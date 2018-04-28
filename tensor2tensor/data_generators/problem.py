@@ -191,6 +191,8 @@ class Problem(object):
   Eval:
     * eval_metrics
         - Specify the set of evaluation metrics for this problem.
+    * eval_hooks
+        - Specify the set of evalueation hooks for this problem.
 
   Inference:
     * feature_encoders(data_dir)
@@ -317,6 +319,9 @@ class Problem(object):
         metrics.Metrics.ACC, metrics.Metrics.ACC_TOP5,
         metrics.Metrics.ACC_PER_SEQ, metrics.Metrics.NEG_LOG_PERPLEXITY
     ]
+
+  def eval_hooks(self, features, logits, hparams):
+    return []
 
   # ============================================================================
   # END SUBCLASS INTERFACE

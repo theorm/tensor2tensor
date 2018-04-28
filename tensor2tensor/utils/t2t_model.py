@@ -1032,6 +1032,9 @@ class T2TModel(base.Layer):
       raise NotImplementedError(_no_problem_err("estimator_spec_eval"))
 
     problem = hparams.problem
+
+    eval_hooks = problem.eval_hooks(features, logits, hparams)
+
     if common_layers.is_on_tpu():
       _remove_summaries()
       if isinstance(logits, dict):
@@ -1069,6 +1072,7 @@ class T2TModel(base.Layer):
           tf.estimator.ModeKeys.EVAL,
           predictions=predictions,
           eval_metric_ops=eval_metrics,
+          evaluation_hooks=eval_hooks,
           loss=loss)
 
   def estimator_spec_predict(self, features, use_tpu=False):
