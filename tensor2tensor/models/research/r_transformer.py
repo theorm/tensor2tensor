@@ -155,6 +155,10 @@ class RTransformer(transformer.Transformer):
       Final decoder representation. [batch_size, decoder_length, hidden_dim]
     """
     hparams = self._hparams
+    if hparams.add_position_timing_signal:
+      # Turning off addition of positional embedding in the encoder/decoder
+      # preparation as we do it in the beginning of each step.
+      hparams.pos = None
 
     if self.has_input:
       inputs = features["inputs"]
@@ -203,10 +207,59 @@ class RTransformer(transformer.Transformer):
           hparams.act_loss_weight *
           tf.reduce_mean(dec_ponder_times + dec_remainders))
       act_loss = enc_act_loss + dec_act_loss
-      tf.summary.scalar("act_loss", act_loss)
+      tf.contrib.summary.scalar("act_loss", act_loss)
       return decoder_output, {"act_loss": act_loss}
 
     return decoder_output
+
+  def _greedy_infer(self, features, decode_length):
+    """Fast version of greedy decoding.
+
+    Args:
+      features: an map of string to `Tensor`
+      decode_length: an integer.  How many additional timesteps to decode.
+
+    Returns:
+      A dict of decoding results {
+          "outputs": integer `Tensor` of decoded ids of shape
+              [batch_size, <= decode_length] if beam_size == 1 or
+              [batch_size, top_beams, <= decode_length]
+          "scores": decoding log probs from the beam search,
+              None if using greedy decoding (beam_size=1)
+      }
+
+    Raises:
+      NotImplementedError: If there are multiple data shards.
+    """
+    with tf.variable_scope(self.name):
+      # TODO(dehghani): Support fast decoding for r-transofmer (needs caching)
+      return self._slow_greedy_infer(features, decode_length)
+
+  def _beam_decode(self, features, decode_length, beam_size, top_beams, alpha):
+    """Beam search decoding.
+
+    Args:
+      features: an map of string to `Tensor`
+      decode_length: an integer.  How many additional timesteps to decode.
+      beam_size: number of beams.
+      top_beams: an integer. How many of the beams to return.
+      alpha: Float that controls the length penalty. larger the alpha, stronger
+        the preference for longer translations.
+
+    Returns:
+      A dict of decoding results {
+          "outputs": integer `Tensor` of decoded ids of shape
+              [batch_size, <= decode_length] if beam_size == 1 or
+              [batch_size, top_beams, <= decode_length]
+          "scores": decoding log probs from the beam search,
+              None if using greedy decoding (beam_size=1)
+      }
+    """
+    with tf.variable_scope(self.name):
+      # Caching is not ebabled in r-transformer
+      # TODO(dehghani): Support fast decoding for r-transofmer(needs caching)
+      return self._beam_decode_slow(features, decode_length, beam_size,
+                                    top_beams, alpha)
 
 
 @registry.register_model
@@ -278,7 +331,7 @@ class RTransformerEncoder(transformer.Transformer):
       ponder_times, remainders = enc_extra_output
       act_loss = hparams.act_loss_weight * tf.reduce_mean(ponder_times +
                                                           remainders)
-      tf.summary.scalar("act_loss", act_loss)
+      tf.contrib.summary.scalar("act_loss", act_loss)
 
       return encoder_output, {"act_loss": act_loss}
     return encoder_output
@@ -295,12 +348,26 @@ def update_hparams_for_r_transformer(hparams):
     hparams with default values for R-Transformers hyper-parameters
 
   """
+  # If true, mixes vanilla transfomer with r-transformer.
+  hparams.add_hparam("mix_with_transformer", False)
+
   # Type of recurrency:
-  # None(no-recurrency) basic, highway, skip, dwa, act, rnn, gru, lstm.
+  # basic, highway, skip, dwa, act, rnn, gru, lstm.
   hparams.add_hparam("recurrence_type", "basic")
 
   # Number of steps (which is equivalent to num layer in transformer).
   hparams.add_hparam("num_rec_steps", hparams.num_hidden_layers)
+
+  # Add the positional mebedding at each step(horisontal timing)
+  hparams.add_hparam("add_position_timing_signal", False)
+  # Logic of position shifting when using timing signal:
+  # None, "random", "step"
+  hparams.add_hparam("position_start_index", None)
+
+  # Add an step embedding at each step (vertical timing)
+  hparams.add_hparam("add_step_timing_signal", False)
+  # Either "learned" or "sinusoid"
+  hparams.add_hparam("step_timing_signal_type", "leaned")
 
   # Default ffn layer is separable convolution.
   hparams.add_hparam("transformer_ffn_type", "sep")
@@ -654,4 +721,214 @@ def r_transformer_gru_base():
 def r_transformer_lstm_base():
   hparams = r_transformer_base()
   hparams.recurrence_type = "lstm"
+  return hparams
+
+
+@registry.register_hparams
+def r_transformer_position_timing_tiny():
+  hparams = r_transformer_tiny()
+  hparams.pos = None
+  hparams.add_position_timing_signal = True
+  return hparams
+
+
+@registry.register_hparams
+def r_transformer_position_random_timing_base():
+  hparams = r_transformer_base()
+  hparams.pos = None
+  hparams.add_position_timing_signal = True
+  hparams.position_start_index = "random"
+  return hparams
+
+
+@registry.register_hparams
+def r_transformer_position_random_timing_tiny():
+  hparams = r_transformer_tiny()
+  hparams.pos = None
+  hparams.add_position_timing_signal = True
+  hparams.position_start_index = "random"
+  return hparams
+
+
+@registry.register_hparams
+def r_transformer_position_step_timing_tiny():
+  hparams = r_transformer_tiny()
+  hparams.pos = None
+  hparams.add_position_timing_signal = True
+  hparams.position_start_index = "step"
+  return hparams
+
+
+@registry.register_hparams
+def r_transformer_step_timing_tiny():
+  hparams = r_transformer_tiny()
+  hparams.add_step_timing_signal = True
+  return hparams
+
+
+@registry.register_hparams
+def r_transformer_step_sinusoid_timing_tiny():
+  hparams = r_transformer_tiny()
+  hparams.add_step_timing_signal = True
+  hparams.step_timing_signal_type = "sinusoid"
+  return hparams
+
+
+@registry.register_hparams
+def r_transformer_step_position_random_timing_tiny():
+  hparams = r_transformer_tiny()
+  hparams.add_position_timing_signal = True
+  hparams.pos = None
+  hparams.position_start_index = "random"
+  hparams.add_step_timing_signal = True
+  return hparams
+
+
+@registry.register_hparams
+def r_transformer_act_position_timing_tiny():
+  hparams = r_transformer_tiny()
+  hparams.recurrence_type = "act"
+  hparams.add_position_timing_signal = True
+  hparams.pos = None
+  return hparams
+
+
+@registry.register_hparams
+def r_transformer_act_position_random_timing_tiny():
+  hparams = r_transformer_tiny()
+  hparams.recurrence_type = "act"
+  hparams.add_position_timing_signal = True
+  hparams.pos = None
+  hparams.position_start_index = "random"
+  return hparams
+
+
+@registry.register_hparams
+def r_transformer_act_position_step_timing_tiny():
+  hparams = r_transformer_tiny()
+  hparams.recurrence_type = "act"
+  hparams.add_position_timing_signal = True
+  hparams.pos = None
+  hparams.position_start_index = "step"
+  return hparams
+
+
+@registry.register_hparams
+def r_transformer_act_step_timing_tiny():
+  hparams = r_transformer_tiny()
+  hparams.recurrence_type = "act"
+  hparams.add_step_timing_signal = True
+  return hparams
+
+
+@registry.register_hparams
+def r_transformer_act_step_position_random_timing_tiny():
+  hparams = r_transformer_tiny()
+  hparams.recurrence_type = "act"
+  hparams.add_position_timing_signal = True
+  hparams.pos = None
+  hparams.position_start_index = "random"
+  hparams.add_step_timing_signal = True
+  return hparams
+
+
+@registry.register_hparams
+def r_transformer_act_step_sinusoid_position_random_timing_tiny():
+  hparams = r_transformer_tiny()
+  hparams.recurrence_type = "act"
+  hparams.add_position_timing_signal = True
+  hparams.pos = None
+  hparams.position_start_index = "random"
+  hparams.add_step_timing_signal = True
+  hparams.step_timing_signal_type = "sinusoid"
+  return hparams
+
+
+@registry.register_hparams
+def r_transformer_act_step_sinusoid_position_timing_tiny():
+  hparams = r_transformer_tiny()
+  hparams.recurrence_type = "act"
+  hparams.add_position_timing_signal = True
+  hparams.pos = None
+  hparams.add_step_timing_signal = True
+  hparams.step_timing_signal_type = "sinusoid"
+  return hparams
+
+
+@registry.register_hparams
+def r_transformer_act_step_position_timing_tiny():
+  hparams = r_transformer_tiny()
+  hparams.recurrence_type = "act"
+  hparams.add_position_timing_signal = True
+  hparams.pos = None
+  hparams.add_step_timing_signal = True
+  return hparams
+
+
+@registry.register_hparams
+def r_transformer_step_position_timing_tiny():
+  hparams = r_transformer_tiny()
+  hparams.add_position_timing_signal = True
+  hparams.pos = None
+  hparams.add_step_timing_signal = True
+  return hparams
+
+
+@registry.register_hparams
+def r_transformer_act_step_position_random_timing_base():
+  hparams = r_transformer_base()
+  hparams.recurrence_type = "act"
+  hparams.add_position_timing_signal = True
+  hparams.pos = None
+  hparams.position_start_index = "random"
+  hparams.add_step_timing_signal = True
+  return hparams
+
+
+@registry.register_hparams
+def r_transformer_act_step_position_timing_base():
+  hparams = r_transformer_base()
+  hparams.recurrence_type = "act"
+  hparams.add_position_timing_signal = True
+  hparams.pos = None
+  hparams.add_step_timing_signal = True
+  return hparams
+
+
+@registry.register_hparams
+def r_transformer_step_position_timing_base():
+  hparams = r_transformer_base()
+  hparams.add_position_timing_signal = True
+  hparams.pos = None
+  hparams.add_step_timing_signal = True
+  return hparams
+
+
+@registry.register_hparams
+def r_mix_transformer_base():
+  hparams = r_transformer_base()
+  hparams.mix_with_transformer = True
+  return hparams
+
+
+@registry.register_hparams
+def r_mix_transformer_act_step_position_timing_base():
+  hparams = r_transformer_base()
+  hparams.mix_with_transformer = True
+  hparams.recurrence_type = "act"
+  hparams.add_position_timing_signal = True
+  hparams.pos = None
+  hparams.add_step_timing_signal = True
+  return hparams
+
+
+@registry.register_hparams
+def r_mix_transformer_act_step_position_random_timing_base():
+  hparams = r_transformer_base()
+  hparams.mix_with_transformer = True
+  hparams.recurrence_type = "act"
+  hparams.add_position_timing_signal = True
+  hparams.pos = None
+  hparams.position_start_index = "random"
+  hparams.add_step_timing_signal = True
   return hparams

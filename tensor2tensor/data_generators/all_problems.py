@@ -36,6 +36,7 @@ modules = [
     "tensor2tensor.data_generators.ice_parsing",
     "tensor2tensor.data_generators.imagenet",
     "tensor2tensor.data_generators.imdb",
+    "tensor2tensor.data_generators.lambada",
     "tensor2tensor.data_generators.librispeech",
     "tensor2tensor.data_generators.lm1b",
     "tensor2tensor.data_generators.mnist",
@@ -46,6 +47,7 @@ modules = [
     "tensor2tensor.data_generators.ptb",
     "tensor2tensor.data_generators.snli",
     "tensor2tensor.data_generators.squad",
+    "tensor2tensor.data_generators.subject_verb_agreement",
     "tensor2tensor.data_generators.translate_encs",
     "tensor2tensor.data_generators.translate_ende",
     "tensor2tensor.data_generators.translate_enet",
@@ -56,6 +58,7 @@ modules = [
     "tensor2tensor.data_generators.twentybn",
     "tensor2tensor.data_generators.wiki",
     "tensor2tensor.data_generators.wikisum.wikisum",
+    "tensor2tensor.data_generators.wikitext103",
     "tensor2tensor.data_generators.wsj_parsing",
 ]
 

@@ -21,11 +21,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import os
-
 # Dependency imports
-
-import gym
 
 from tensor2tensor.rl.envs.in_graph_batch_env import InGraphBatchEnv
 from tensor2tensor.utils import registry
@@ -38,9 +34,6 @@ flags = tf.flags
 FLAGS = flags.FLAGS
 
 
-flags.DEFINE_string("frames_path", "", "Path to the first frames.")
-
-
 class SimulatedBatchEnv(InGraphBatchEnv):
   """Batch of environments inside the TensorFlow graph.
 
@@ -48,43 +41,45 @@ class SimulatedBatchEnv(InGraphBatchEnv):
   a tf.py_func(). The current batch of observations, actions, rewards, and done
   flags are held in according variables.
   """
+  NUMBER_OF_HISTORY_FRAMES = 2
 
-  def __init__(self, length, observ_shape, observ_dtype, action_shape,
-               action_dtype):
+  def __init__(self, environment_lambda, length):
     """Batch of environments inside the TensorFlow graph."""
     self.length = length
+    initialization_env = environment_lambda()
     hparams = trainer_lib.create_hparams(
         FLAGS.hparams_set, problem_name=FLAGS.problem, data_dir="UNUSED")
     hparams.force_full_predict = True
     self._model = registry.model(FLAGS.model)(
         hparams, tf.estimator.ModeKeys.PREDICT)
 
-    self.action_shape = action_shape
-    self.action_dtype = action_dtype
+    self.action_space = initialization_env.action_space
+    self.action_shape = list(initialization_env.action_space.shape)
+    self.action_dtype = tf.int32
 
-    with open(os.path.join(FLAGS.frames_path, "frame1.png"), "rb") as f:
-      png_frame_1_raw = f.read()
+    if hasattr(initialization_env.env, "get_starting_data"):
+      starting_observations, _, _ = initialization_env.env.get_starting_data()
+      obs_1 = starting_observations[0]
+      obs_2 = starting_observations[1]
+    else:
+      # Ancient method for environments not supporting get_starting_data
+      initialization_env.reset()
+      skip_frames = 20
+      for _ in range(skip_frames):
+        initialization_env.step(0)
+      obs_1 = initialization_env.step(0)[0]
+      obs_2 = initialization_env.step(0)[0]
 
-    with open(os.path.join(FLAGS.frames_path, "frame2.png"), "rb") as f:
-      png_frame_2_raw = f.read()
+    self.frame_1 = tf.expand_dims(tf.cast(obs_1, tf.float32), 0)
+    self.frame_2 = tf.expand_dims(tf.cast(obs_2, tf.float32), 0)
 
-    self.frame_1 = tf.expand_dims(tf.cast(tf.image.decode_png(png_frame_1_raw),
-                                          tf.float32), 0)
-    self.frame_2 = tf.expand_dims(tf.cast(tf.image.decode_png(png_frame_2_raw),
-                                          tf.float32), 0)
-
-    shape = (self.length,) + observ_shape
-    self._observ = tf.Variable(tf.zeros(shape, observ_dtype), trainable=False)
-    self._prev_observ = tf.Variable(tf.zeros(shape, observ_dtype),
+    shape = (self.length,) + initialization_env.observation_space.shape
+    # TODO(blazej0) - make more generic - make higher number of
+    # and make it compatibile with NUMBER_OF_HISTORY_FRAMES
+    #   previous observations possible.
+    self._observ = tf.Variable(tf.zeros(shape, tf.float32), trainable=False)
+    self._prev_observ = tf.Variable(tf.zeros(shape, tf.float32),
                                     trainable=False)
-    self._starting_observ = tf.Variable(tf.zeros(shape, observ_dtype),
-                                        trainable=False)
-
-    observ_dtype = tf.int64
-
-  @property
-  def action_space(self):
-    return gym.make("PongNoFrameskip-v4").action_space
 
   def __len__(self):
     """Number of combined environments."""
@@ -100,11 +95,14 @@ class SimulatedBatchEnv(InGraphBatchEnv):
       action = tf.concat([action, action], axis=0)
       inputs = {"inputs": tf.expand_dims(inputs_merged, axis=0),  # Add batch.
                 "input_action": tf.expand_dims(action, axis=0)}
-      model_output = self._model.infer(inputs)
+      with tf.variable_scope(tf.get_variable_scope(), reuse=tf.AUTO_REUSE):
+        model_output = self._model.infer(inputs)
       observ = model_output["targets"]
       observ = tf.cast(observ[:, 0, :, :, :], tf.float32)
+      # TODO(lukaszkaiser): instead of -1 use min_reward in the line below.
       reward = model_output["target_reward"][:, 0, 0, 0] - 1
       reward = tf.cast(reward, tf.float32)
+      reward = tf.reshape(reward, shape=(self.length,)) #some wrappers need explicit shape
       done = tf.constant(False, tf.bool, shape=(self.length,))
 
       with tf.control_dependencies([observ]):
