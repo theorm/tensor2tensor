@@ -52,27 +52,29 @@ def ppo_base_v1():
   hparams.add_hparam("optimization_batch_size", 50)
   hparams.add_hparam("max_gradients_norm", 0.5)
   hparams.add_hparam("simulated_environment", False)
+  hparams.add_hparam("simulation_random_starts", False)
+  hparams.add_hparam("intrinsic_reward_scale", 0.)
   return hparams
 
 
 @registry.register_hparams
-def continuous_action_base():
+def ppo_continuous_action_base():
   hparams = ppo_base_v1()
   hparams.add_hparam("network", feed_forward_gaussian_fun)
   return hparams
 
 
 @registry.register_hparams
-def discrete_action_base():
+def ppo_discrete_action_base():
   hparams = ppo_base_v1()
   hparams.add_hparam("network", feed_forward_categorical_fun)
   return hparams
 
 
 @registry.register_hparams
-def atari_base():
+def ppo_atari_base():
   """Atari base parameters."""
-  hparams = discrete_action_base()
+  hparams = ppo_discrete_action_base()
   hparams.learning_rate = 16e-5
   hparams.num_agents = 5
   hparams.epoch_length = 200
@@ -84,6 +86,35 @@ def atari_base():
   hparams.epochs_num = 10000
   hparams.num_eval_agents = 1
   hparams.network = feed_forward_cnn_small_categorical_fun
+  return hparams
+
+
+@registry.register_hparams
+def ppo_pong_base():
+  """Pong base parameters."""
+  hparams = ppo_discrete_action_base()
+  hparams.learning_rate = 8e-5
+  hparams.num_agents = 8
+  hparams.epoch_length = 200
+  hparams.gae_gamma = 0.985
+  hparams.gae_lambda = 0.985
+  hparams.entropy_loss_coef = 0.003
+  hparams.value_loss_coef = 1
+  hparams.optimization_epochs = 2
+  hparams.epochs_num = 1000
+  hparams.num_eval_agents = 1
+  hparams.network = feed_forward_cnn_small_categorical_fun
+  hparams.clipping_coef = 0.2
+  hparams.optimization_batch_size = 4
+  hparams.max_gradients_norm = 0.5
+  return hparams
+
+
+@registry.register_hparams
+def ppo_pong_ae_base():
+  """Pong autoencoder base parameters."""
+  hparams = ppo_pong_base()
+  hparams.network = feed_forward_categorical_fun
   return hparams
 
 

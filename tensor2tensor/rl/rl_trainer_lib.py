@@ -13,8 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Library for training of RL agent with PPO algorithm."""
-
 from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
 
 import functools
 import os
@@ -32,8 +33,6 @@ from tensor2tensor.rl.envs import tf_atari_wrappers
 from tensor2tensor.rl.envs import utils
 
 import tensorflow as tf
-
-
 
 
 def define_train(hparams, environment_spec, event_dir):
@@ -101,7 +100,7 @@ def train(hparams, environment_spec, event_dir=None):
     model_saver = None
 
   if hparams.simulated_environment:
-    env_model_loader = tf.train.Saver(tf.global_variables(".*basic_conv_gen.*"))
+    env_model_loader = tf.train.Saver(tf.global_variables("basic_conv_gen.*"))
   else:
     env_model_loader = None
 
@@ -122,7 +121,8 @@ def train(hparams, environment_spec, event_dir=None):
           summary_writer.add_summary(summary, epoch_index)
         else:
           tf.logging.info("Eval summary not saved")
-      if (model_saver and hparams.save_models_every_epochs and
-          epoch_index % hparams.save_models_every_epochs == 0):
+      if (model_saver and ((hparams.save_models_every_epochs and
+          epoch_index % hparams.save_models_every_epochs == 0)
+          or (epoch_index == hparams.epochs_num-1))):
         model_saver.save(sess, os.path.join(event_dir,
                                             "model{}.ckpt".format(epoch_index)))

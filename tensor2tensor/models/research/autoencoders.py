@@ -38,6 +38,9 @@ class AutoencoderAutoregressive(basic.BasicAutoencoder):
     is_training = hparams.mode == tf.estimator.ModeKeys.TRAIN
     # Run the basic autoencoder part first.
     basic_result, losses = super(AutoencoderAutoregressive, self).body(features)
+    if hparams.autoregressive_mode == "none":
+      assert not hparams.autoregressive_forget_base
+      return basic_result, losses
     shape = common_layers.shape_list(basic_result)
     basic1d = tf.reshape(basic_result, [shape[0], -1, shape[3]])
     # During autoregressive inference, don't resample.
@@ -68,9 +71,6 @@ class AutoencoderAutoregressive(basic.BasicAutoencoder):
       concat1d = tf.reshape(features["targets"], [shape[0], -1, shape[3]])
       concat1d = common_layers.shift_right_3d(concat1d)
     # The autoregressive part depends on the mode.
-    if hparams.autoregressive_mode == "none":
-      assert not hparams.autoregressive_forget_base
-      return basic_result, losses
     if hparams.autoregressive_mode == "conv3":
       res = common_layers.conv1d(concat1d, shape[3], 3, padding="LEFT",
                                  activation=common_layers.belu,
@@ -106,9 +106,10 @@ class AutoencoderAutoregressive(basic.BasicAutoencoder):
       num_channels = self.hparams.problem.num_channels
     except AttributeError:
       num_channels = 1
-    features["targets"] = tf.zeros(
-        [self.hparams.batch_size, 1, 1, num_channels],
-        dtype=tf.int32)
+    if "targets" not in features:
+      features["targets"] = tf.zeros(
+          [self.hparams.batch_size, 1, 1, num_channels],
+          dtype=tf.int32)
     logits, _ = self(features)  # pylint: disable=not-callable
     samples = common_layers.sample_with_temperature(
         logits, 0.0)
@@ -304,6 +305,8 @@ class AutoencoderOrderedDiscrete(AutoencoderResidualDiscrete):
 
   def bottleneck(self, x):
     hparams = self.hparams
+    if hparams.unordered:
+      return super(AutoencoderOrderedDiscrete, self).bottleneck(x)
     noise = hparams.bottleneck_noise
     hparams.bottleneck_noise = 0.0  # We'll add noise below.
     x = discretization.parametrized_bottleneck(x, hparams)
@@ -435,7 +438,8 @@ def autoencoder_residual():
   """Residual autoencoder model."""
   hparams = autoencoder_autoregressive()
   hparams.optimizer = "Adafactor"
-  hparams.learning_rate_constant = 0.2
+  hparams.clip_grad_norm = 1.0
+  hparams.learning_rate_constant = 0.5
   hparams.learning_rate_warmup_steps = 500
   hparams.learning_rate_schedule = "constant * linear_warmup * rsqrt_decay"
   hparams.dropout = 0.05
@@ -496,6 +500,7 @@ def autoencoder_ordered_discrete():
   """Basic autoencoder model."""
   hparams = autoencoder_residual_discrete()
   hparams.bottleneck_noise = 1.0
+  hparams.add_hparam("unordered", False)
   return hparams
 
 
@@ -503,11 +508,21 @@ def autoencoder_ordered_discrete():
 def autoencoder_discrete_pong():
   """Discrete autoencoder model for compressing pong frames."""
   hparams = autoencoder_ordered_discrete()
+  hparams.num_hidden_layers = 4
   hparams.bottleneck_size = 24
-  hparams.dropout = 0.2
+  hparams.dropout = 0.1
   hparams.batch_size = 2
-  hparams.bottleneck_noise = 0.4
+  hparams.bottleneck_noise = 0.2
+  hparams.max_hidden_size = 1024
+  hparams.unordered = True
   return hparams
+
+
+@registry.register_ranged_hparams
+def autoencoder_discrete_pong_range(rhp):
+  """Narrow tuning grid."""
+  rhp.set_float("dropout", 0.0, 0.2)
+  rhp.set_discrete("max_hidden_size", [1024, 2048])
 
 
 @registry.register_hparams

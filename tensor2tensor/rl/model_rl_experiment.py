@@ -12,7 +12,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Training of model-based RL agents."""
+r"""Training of model-based RL agents.
+
+Example invocation:
+
+python -m tensor2tensor.rl.model_rl_experiment \
+    --output_dir=$HOME/t2t/rl_v1 \
+    --loop_hparams_set=rl_modelrl_base \
+    --loop_hparams='true_env_generator_num_steps=10000,epochs=3'
+"""
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
 
 import datetime
 import os
@@ -34,7 +45,9 @@ import tensorflow as tf
 flags = tf.flags
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string("rl_hparams", "", "Overrides for RL-specific HParams.")
+flags.DEFINE_string("loop_hparams_set", "rl_modelrl_base",
+                    "Which RL hparams set to use.")
+flags.DEFINE_string("loop_hparams", "", "Overrides for overall loop HParams.")
 
 
 def train(hparams, output_dir):
@@ -43,60 +56,118 @@ def train(hparams, output_dir):
   data_dir = os.path.expanduser(prefix + "/data")
   tmp_dir = os.path.expanduser(prefix + "/tmp")
   output_dir = os.path.expanduser(prefix + "/output")
+  autoencoder_dir = os.path.expanduser(prefix + "/autoencoder")
   tf.gfile.MakeDirs(data_dir)
   tf.gfile.MakeDirs(tmp_dir)
   tf.gfile.MakeDirs(output_dir)
+  tf.gfile.MakeDirs(autoencoder_dir)
   last_model = ""
   start_time = time.time()
   line = ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>    "
+  epoch_metrics = []
+  iter_data_dirs = []
+  ae_data_dirs = []
+  orig_autoencoder_path = FLAGS.autoencoder_path
   for iloop in range(hparams.epochs):
-    time_delta = time.time() - start_time
-    tf.logging.info("%s Step %d.1 - generate data from policy. Time: %s",
-                    line, iloop, str(datetime.timedelta(seconds=time_delta)))
-    FLAGS.problem = "gym_discrete_problem_with_agent_on_%s" % hparams.game
-    FLAGS.agent_policy_path = last_model
-    gym_problem = registry.problem(FLAGS.problem)
-    gym_problem.settable_num_steps = hparams.true_env_generator_num_steps
-    iter_data_dir = os.path.join(data_dir, str(iloop))
-    tf.gfile.MakeDirs(iter_data_dir)
-    gym_problem.generate_data(iter_data_dir, tmp_dir)
+    # Train autoencoder if needed.
+    if (hparams.autoencoder_train_steps > 0 and iloop == 0 and
+        not orig_autoencoder_path):
+      time_delta = time.time() - start_time
+      tf.logging.info("%s Step AE - train autoencoder. Time: %s",
+                      line, str(datetime.timedelta(seconds=time_delta)))
+      with tf.Graph().as_default():
+        # Generate data.
+        FLAGS.autoencoder_path = ""
+        FLAGS.problem = "gym_discrete_problem_with_agent_on_%s" % hparams.game
+        FLAGS.agent_policy_path = ""
+        gym_problem = registry.problem(FLAGS.problem)
+        gym_problem.settable_num_steps = hparams.true_env_generator_num_steps
+        ae_data_dir = os.path.join(data_dir, "ae%d" % iloop)
+        ae_data_dirs.append(ae_data_dir)
+        tf.gfile.MakeDirs(ae_data_dir)
+        gym_problem.generate_data(ae_data_dir, tmp_dir)
+        if ae_data_dirs[:-1]:
+          combine_world_model_train_data(gym_problem,
+                                         ae_data_dir,
+                                         ae_data_dirs[:-1])
+        # Train AE.
+        FLAGS.data_dir = ae_data_dir
+        FLAGS.output_dir = autoencoder_dir
+        # TODO(lukaszkaiser): make non-hardcoded here and in gym_problems.py.
+        FLAGS.model = "autoencoder_ordered_discrete"
+        FLAGS.hparams_set = "autoencoder_discrete_pong"
+        FLAGS.train_steps = hparams.autoencoder_train_steps * (iloop + 2)
+        FLAGS.eval_steps = 100
+        t2t_trainer.main([])
+        FLAGS.autoencoder_path = autoencoder_dir
+
+    # Generate random frames.
+    if iloop == 0:
+      time_delta = time.time() - start_time
+      tf.logging.info("%s Step %d.0 - generate random data. Time: %s",
+                      line, iloop, str(datetime.timedelta(seconds=time_delta)))
+      FLAGS.problem = "gym_discrete_problem_with_agent_on_%s" % hparams.game
+      FLAGS.agent_policy_path = ""
+      gym_problem = registry.problem(FLAGS.problem)
+      gym_problem.settable_num_steps = hparams.true_env_generator_num_steps
+      iter_data_dir = os.path.join(data_dir, "0random")
+      iter_data_dirs.append(iter_data_dir)
+      tf.gfile.MakeDirs(iter_data_dir)
+      gym_problem.generate_data(iter_data_dir, tmp_dir)
+      mean_reward = gym_problem.sum_of_rewards / max(1.0, gym_problem.dones)
+      tf.logging.info("%s Step 0.0 random reward: %.4f" % (line, mean_reward))
 
     time_delta = time.time() - start_time
-    tf.logging.info("%s Step %d.2 - generate env model. Time: %s",
+    tf.logging.info("%s Step %d.1 - generate env model. Time: %s",
                     line, iloop, str(datetime.timedelta(seconds=time_delta)))
-    # 2. generate env model
+
+    # Train env model
     FLAGS.data_dir = iter_data_dir
     FLAGS.output_dir = output_dir
     FLAGS.model = hparams.generative_model
     FLAGS.hparams_set = hparams.generative_model_params
     FLAGS.train_steps = hparams.model_train_steps * (iloop + 2)
-    FLAGS.eval_steps = 10
+    FLAGS.eval_steps = 100
     t2t_trainer.main([])
 
-    # Dump frames from env model.
+    # Evaluate and dump frames from env model
     time_delta = time.time() - start_time
-    tf.logging.info("%s Step %d.3 - evaluate env model. Time: %s",
+    tf.logging.info("%s Step %d.1a - evaluate env model. Time: %s",
                     line, iloop, str(datetime.timedelta(seconds=time_delta)))
     gym_simulated_problem = registry.problem(
         "gym_simulated_discrete_problem_with_agent_on_%s" % hparams.game)
     sim_steps = hparams.simulated_env_generator_num_steps
     gym_simulated_problem.settable_num_steps = sim_steps
+    gym_simulated_problem.real_env_problem = gym_problem
+    gym_simulated_problem.simulation_random_starts = False
+    gym_simulated_problem.intrinsic_reward_scale = 0.
     gym_simulated_problem.generate_data(iter_data_dir, tmp_dir)
+    model_reward_accuracy = 0.0
+    if gym_simulated_problem.dones != 0:
+      n = float(gym_simulated_problem.dones)
+      model_reward_accuracy = (
+          gym_simulated_problem.successful_episode_reward_predictions / n)
+    tf.logging.info("%s Step %d.1a env model reward accuracy: %.4f" % (
+        line, iloop, model_reward_accuracy))
 
-    # PPO.
+    # Train PPO agent
     time_delta = time.time() - start_time
-    tf.logging.info("%s Step %d.4 - train PPO in model env. Time: %s",
+    tf.logging.info("%s Step %d.2 - train PPO in model env. Time: %s",
                     line, iloop, str(datetime.timedelta(seconds=time_delta)))
-    ppo_epochs_num = hparams.ppo_epochs_num
 
     # Setup PPO hparams
-    ppo_hparams = trainer_lib.create_hparams("atari_base", data_dir=output_dir)
-    ppo_hparams.epochs_num = ppo_epochs_num + 1
+    ppo_hparams = trainer_lib.create_hparams(hparams.ppo_params,
+                                             data_dir=output_dir)
+    ppo_epochs_num = hparams.ppo_epochs_num
+    ppo_hparams.epochs_num = ppo_epochs_num
     ppo_hparams.simulated_environment = True
+    ppo_hparams.simulation_random_starts = hparams.simulation_random_starts
+    ppo_hparams.intrinsic_reward_scale = hparams.intrinsic_reward_scale
     ppo_hparams.eval_every_epochs = 0
     ppo_hparams.save_models_every_epochs = ppo_epochs_num
     ppo_hparams.epoch_length = hparams.ppo_epoch_length
     ppo_hparams.num_agents = hparams.ppo_num_agents
+    ppo_hparams.problem = gym_problem
 
     in_graph_wrappers = [
         (TimeLimitWrapper, {"timelimit": hparams.ppo_time_limit}),
@@ -106,81 +177,296 @@ def train(hparams, output_dir):
 
     ppo_dir = generator_utils.make_tmp_dir(dir=data_dir, prefix="ppo_")
     rl_trainer_lib.train(ppo_hparams, gym_simulated_problem.env_name, ppo_dir)
-
     last_model = ppo_dir
 
+    # Evaluate agent.
+    time_delta = time.time() - start_time
+    tf.logging.info("%s Step %d.3 - evaluate agent. Time: %s",
+                    line, iloop, str(datetime.timedelta(seconds=time_delta)))
+    FLAGS.problem = "gym_discrete_problem_with_agent_on_%s" % hparams.game
+    FLAGS.agent_policy_path = last_model
+    eval_gym_problem = registry.problem(FLAGS.problem)
+    eval_gym_problem.settable_num_steps = hparams.true_env_generator_num_steps
+    eval_gym_problem.eval_runs = 5
+    eval_data_dir = os.path.join(data_dir, str(iloop)+"eval")
+    iter_data_dirs.append(eval_data_dir)
+    tf.gfile.MakeDirs(eval_data_dir)
+    eval_gym_problem.generate_data(eval_data_dir, tmp_dir)
 
-hparams_old = tf.contrib.training.HParams(
-    epochs=10,
-    true_env_generator_num_steps=50000,
-    generative_model="basic_conv_gen",
-    generative_model_params="basic_conv",
-    model_train_steps=50000,
-    simulated_env_generator_num_steps=300,
-    ppo_epochs_num=2000,
-    ppo_epoch_length=300,
-    game="pong",
-)
+    # Generate environment frames.
+    time_delta = time.time() - start_time
+    tf.logging.info("%s Step %d.4 - generate environment data. Time: %s",
+                    line, iloop, str(datetime.timedelta(seconds=time_delta)))
+    gym_problem = registry.problem(FLAGS.problem)
+    gym_problem.settable_num_steps = hparams.true_env_generator_num_steps
+    iter_data_dir = os.path.join(data_dir, str(iloop))
+    iter_data_dirs.append(iter_data_dir)
+    tf.gfile.MakeDirs(iter_data_dir)
+    gym_problem.generate_data(iter_data_dir, tmp_dir)
+    combine_world_model_train_data(gym_problem,
+                                   iter_data_dir,
+                                   iter_data_dirs[:-1])
 
-# This is a tiny set for testing.
-hparams_tiny = tf.contrib.training.HParams(
-    epochs=2,
-    true_env_generator_num_steps=20,
-    generative_model="basic_conv_gen",
-    generative_model_params="basic_conv",
-    model_train_steps=10,
-    simulated_env_generator_num_steps=20,
-    ppo_epochs_num=2,
-    # Our simulated envs do not know how to reset.
-    # You should set ppo_time_limit to the value you believe that
-    # the simulated env produces a reasonable output.
-    ppo_time_limit=200,
-    # It makes sense to have ppo_time_limit=ppo_epoch_length,
-    # though it is not necessary.
-    ppo_epoch_length=200,
-    ppo_num_agents=1,
-    game="wrapped_pong",
-)
+    mean_reward = 0.0
+    if eval_gym_problem.dones != 0:
+      mean_reward = eval_gym_problem.sum_of_rewards / float(eval_gym_problem.dones)
+    tf.logging.info("%s Step %d mean reward: %.4f" % (line, iloop, mean_reward))
 
-hparams_small = tf.contrib.training.HParams(
-    epochs=10,
-    true_env_generator_num_steps=300,
-    generative_model="basic_conv_gen",
-    generative_model_params="basic_conv",
-    model_train_steps=100,
-    simulated_env_generator_num_steps=210,
-    ppo_epochs_num=200,
-    # Our simulated envs do not know how to reset.
-    # You should set ppo_time_limit to the value you believe that
-    # the simulated env produces a reasonable output.
-    ppo_time_limit=200,
-    # It makes sense to have ppo_time_limit=ppo_epoch_length,
-    # though it is not necessary.
-    ppo_epoch_length=200,
-    ppo_num_agents=1,
-    game="wrapped_pong",
-)
+    # Report metrics.
+    eval_metrics = {"model_reward_accuracy": model_reward_accuracy,
+                    "mean_reward": mean_reward}
+    epoch_metrics.append(eval_metrics)
 
-hparams_first = tf.contrib.training.HParams(
-    epochs=10,
-    true_env_generator_num_steps=60000,
-    generative_model="basic_conv_gen",
-    generative_model_params="basic_conv",
-    model_train_steps=50000,
-    simulated_env_generator_num_steps=2000,
-    ppo_epochs_num=2000,  # This should be enough to see something
-    ppo_time_limit=1000,
-    ppo_epoch_length=200,  # 200 worked with the standard pong.
-    ppo_num_agents=1,
-    game="wrapped_pong",
-)
+  # Report the evaluation metrics from the final epoch
+  return epoch_metrics[-1]
+
+
+
+
+def combine_world_model_train_data(problem, final_data_dir, old_data_dirs):
+  """Add training data from old_data_dirs into final_data_dir."""
+  for data_dir in old_data_dirs:
+    suffix = os.path.basename(data_dir)
+    # Glob train files in old data_dir
+    old_train_files = tf.gfile.Glob(
+        problem.filepattern(data_dir, tf.estimator.ModeKeys.TRAIN))
+    for fname in old_train_files:
+      # Move them to the new data_dir with a suffix
+      # Since the data is read based on a prefix filepattern, adding the suffix
+      # should be fine.
+      new_fname = os.path.join(final_data_dir,
+                               os.path.basename(fname) + "." + suffix)
+      if tf.gfile.Exists(new_fname):
+        tf.gfile.Remove(new_fname)
+      tf.gfile.Copy(fname, new_fname)
+
+
+@registry.register_hparams
+def rl_modelrl_base():
+  return tf.contrib.training.HParams(
+      epochs=3,
+      true_env_generator_num_steps=30000,
+      generative_model="basic_conv_gen",
+      generative_model_params="basic_conv",
+      ppo_params="ppo_pong_base",
+      autoencoder_train_steps=0,
+      model_train_steps=100000,
+      simulated_env_generator_num_steps=2000,
+      simulation_random_starts=True,
+      intrinsic_reward_scale=0.,
+      ppo_epochs_num=500,  # This should be enough to see something
+      # Our simulated envs do not know how to reset.
+      # You should set ppo_time_limit to the value you believe that
+      # the simulated env produces a reasonable output.
+      ppo_time_limit=200,
+      # It makes sense to have ppo_time_limit=ppo_epoch_length,
+      # though it is not necessary.
+      ppo_epoch_length=200,
+      ppo_num_agents=8,
+      game="wrapped_long_pong",
+  )
+
+
+@registry.register_hparams
+def rl_modelrl_medium():
+  """Small set for larger testing."""
+  hparams = rl_modelrl_base()
+  hparams.true_env_generator_num_steps //= 2
+  hparams.model_train_steps //= 2
+  hparams.ppo_epochs_num //= 2
+  return hparams
+
+
+@registry.register_hparams
+def rl_modelrl_short():
+  """Small set for larger testing."""
+  hparams = rl_modelrl_base()
+  hparams.true_env_generator_num_steps //= 5
+  hparams.model_train_steps //= 10
+  hparams.ppo_epochs_num //= 10
+  return hparams
+
+
+@registry.register_hparams
+def rl_modelrl_tiny():
+  """Tiny set for testing."""
+  tiny_hp = tf.contrib.training.HParams(
+      epochs=2,
+      true_env_generator_num_steps=200,
+      model_train_steps=2,
+      simulated_env_generator_num_steps=200,
+      ppo_epochs_num=2,
+      ppo_time_limit=20,
+      ppo_epoch_length=20,
+  )
+  return rl_modelrl_base().override_from_dict(tiny_hp.values())
+
+
+@registry.register_hparams
+def rl_modelrl_l1_base():
+  """Parameter set with L1 loss."""
+  hparams = rl_modelrl_base()
+  hparams.generative_model_params = "basic_conv_l1"
+  return hparams
+
+
+@registry.register_hparams
+def rl_modelrl_l1_medium():
+  """Medium parameter set with L1 loss."""
+  hparams = rl_modelrl_medium()
+  hparams.generative_model_params = "basic_conv_l1"
+  return hparams
+
+
+@registry.register_hparams
+def rl_modelrl_l1_short():
+  """Short parameter set with L1 loss."""
+  hparams = rl_modelrl_short()
+  hparams.generative_model_params = "basic_conv_l1"
+  return hparams
+
+
+@registry.register_hparams
+def rl_modelrl_l1_tiny():
+  """Tiny parameter set with L1 loss."""
+  hparams = rl_modelrl_tiny()
+  hparams.generative_model_params = "basic_conv_l1"
+  return hparams
+
+
+@registry.register_hparams
+def rl_modelrl_l2_base():
+  """Parameter set with L2 loss."""
+  hparams = rl_modelrl_base()
+  hparams.generative_model_params = "basic_conv_l2"
+  return hparams
+
+
+@registry.register_hparams
+def rl_modelrl_l2_medium():
+  """Medium parameter set with L2 loss."""
+  hparams = rl_modelrl_medium()
+  hparams.generative_model_params = "basic_conv_l2"
+  return hparams
+
+
+@registry.register_hparams
+def rl_modelrl_l2_short():
+  """Short parameter set with L2 loss."""
+  hparams = rl_modelrl_short()
+  hparams.generative_model_params = "basic_conv_l2"
+  return hparams
+
+
+@registry.register_hparams
+def rl_modelrl_l2_tiny():
+  """Tiny parameter set with L2 loss."""
+  hparams = rl_modelrl_tiny()
+  hparams.generative_model_params = "basic_conv_l2"
+  return hparams
+
+
+@registry.register_hparams
+def rl_modelrl_ae_base():
+  """Parameter set for autoencoders."""
+  hparams = rl_modelrl_base()
+  hparams.ppo_params = "ppo_pong_ae_base"
+  hparams.generative_model_params = "basic_conv_ae"
+  hparams.autoencoder_train_steps = 100000
+  return hparams
+
+
+@registry.register_hparams
+def rl_modelrl_ae_l1_base():
+  """Parameter set for autoencoders and L1 loss."""
+  hparams = rl_modelrl_ae_base()
+  hparams.generative_model_params = "basic_conv_l1"
+  return hparams
+
+
+@registry.register_hparams
+def rl_modelrl_ae_l2_base():
+  """Parameter set for autoencoders and L2 loss."""
+  hparams = rl_modelrl_ae_base()
+  hparams.generative_model_params = "basic_conv_l2"
+  return hparams
+
+
+@registry.register_hparams
+def rl_modelrl_ae_medium():
+  """Medium parameter set for autoencoders."""
+  hparams = rl_modelrl_ae_base()
+  hparams.autoencoder_train_steps //= 2
+  hparams.true_env_generator_num_steps //= 2
+  hparams.model_train_steps //= 2
+  hparams.ppo_epochs_num //= 2
+  return hparams
+
+
+@registry.register_hparams
+def rl_modelrl_ae_short():
+  """Small parameter set for autoencoders."""
+  hparams = rl_modelrl_ae_base()
+  hparams.autoencoder_train_steps //= 10
+  hparams.true_env_generator_num_steps //= 5
+  hparams.model_train_steps //= 10
+  hparams.ppo_epochs_num //= 10
+  return hparams
+
+
+@registry.register_hparams
+def rl_modelrl_ae_tiny():
+  """Tiny set for testing autoencoders."""
+  hparams = rl_modelrl_tiny()
+  hparams.ppo_params = "ppo_pong_ae_base"
+  hparams.generative_model_params = "basic_conv_ae"
+  hparams.autoencoder_train_steps = 20
+  return hparams
+
+
+@registry.register_hparams
+def rl_modelrl_tiny_breakout():
+  """Tiny set for testing Breakout."""
+  hparams = rl_modelrl_tiny()
+  hparams.game = "wrapped_breakout"
+  return hparams
+
+
+@registry.register_hparams
+def rl_modelrl_tiny_freeway():
+  """Tiny set for testing Freeway."""
+  hparams = rl_modelrl_tiny()
+  hparams.game = "freeway"
+  return hparams
+
+
+@registry.register_hparams
+def rl_modelrl_freeway():
+  """Tiny set for testing Freeway."""
+  hparams = rl_modelrl_base()
+  hparams.game = "freeway"
+  return hparams
+
+
+@registry.register_hparams
+def rl_modelrl_tiny_simulation_deterministic_starts():
+  hp = rl_modelrl_tiny()
+  hp.simulation_random_starts = False
+  return hp
+
+
+def create_loop_hparams():
+  hparams = registry.hparams(FLAGS.loop_hparams_set)()
+  hparams.parse(FLAGS.loop_hparams)
+  return hparams
 
 
 def main(_):
-  hparams = hparams_first
-  hparams.parse(FLAGS.rl_hparams)
-  train(hparams, FLAGS.output_dir)
+  hp = create_loop_hparams()
+  output_dir = FLAGS.output_dir
+  train(hp, output_dir)
 
 
 if __name__ == "__main__":
+  tf.logging.set_verbosity(tf.logging.INFO)
   tf.app.run()

@@ -1677,6 +1677,9 @@ def pad_to_same_length(x, y, final_length_divisible_by=1, axis=1):
   with tf.name_scope("pad_to_same_length", values=[x, y]):
     x_length = shape_list(x)[axis]
     y_length = shape_list(y)[axis]
+    if (isinstance(x_length, int) and isinstance(y_length, int) and
+        x_length == y_length and final_length_divisible_by == 1):
+      return x, y
     max_length = tf.maximum(x_length, y_length)
     if final_length_divisible_by > 1:
       # Find the nearest larger-or-equal integer divisible by given number.
@@ -1711,7 +1714,7 @@ def pad_with_zeros(logits, labels):
   """Pad labels on the length dimension to match logits length."""
   with tf.name_scope("pad_with_zeros", values=[logits, labels]):
     logits, labels = pad_to_same_length(logits, labels)
-    if len(labels.shape.as_list()) == 3:  # 2-d labels.
+    if len(labels.shape) == 3:  # 2-d labels.
       logits, labels = pad_to_same_length(logits, labels, axis=2)
     return logits, labels
 
@@ -2670,6 +2673,13 @@ def shape_list(x):
   return ret
 
 
+def list_product(els):
+  prod = els[0]
+  for el in els[1:]:
+    prod *= el
+  return prod
+
+
 def sample_with_temperature(logits, temperature):
   """Either argmax or random sampling.
 
@@ -2681,7 +2691,10 @@ def sample_with_temperature(logits, temperature):
     a Tensor with one fewer dimension than logits.
   """
   if temperature == 0.0:
-    return tf.argmax(logits, -1)
+    # TF argmax doesn't handle >5 dimensions, so we reshape here.
+    logits_shape = shape_list(logits)
+    argmax = tf.argmax(tf.reshape(logits, [-1, logits_shape[-1]]), axis=1)
+    return tf.reshape(argmax, logits_shape[:-1])
   else:
     assert temperature > 0.0
     reshaped_logits = (
@@ -2983,6 +2996,39 @@ def top_1_tpu(inputs):
   mask = tf.to_int32(tf.equal(inputs_max, inputs))
   index = tf.range(tf.shape(inputs)[-1]) * mask
   return tf.squeeze(inputs_max, -1), tf.reduce_max(index, axis=-1)
+
+
+def index_last_dim_with_indices(x, indices):
+  """Use indices to index into the last axis of x.
+
+  This can be useful for recovering the actual probabilities of a sample from a
+  probability distribution.
+
+  Args:
+    x: Tensor, n-d.
+    indices: Tensor, (n-1)-d, where the dimension sizes match the first (n-1)
+      dimensions of x. The values of indices will be used to index into the last
+      axis of x.
+
+  Returns:
+    Tensor, (n-1)-d.
+  """
+  assert len(x.shape) == len(indices.shape) + 1
+
+  x_shape = shape_list(x)
+  vocab_size = x_shape[-1]
+
+  flat_x = tf.reshape(x, [list_product(x_shape[:-1]), vocab_size])
+  flat_indices = tf.reshape(indices, [list_product(x_shape[:-1])])
+
+  idx = tf.stack(
+      [tf.range(tf.to_int64(shape_list(flat_indices)[0])),
+       tf.to_int64(flat_indices)], axis=1)
+  flat_x_idx = tf.gather_nd(flat_x, idx)
+
+  x_idx = tf.reshape(flat_x_idx, x_shape[:-1])
+
+  return x_idx
 
 
 def should_generate_summaries():

@@ -170,6 +170,15 @@ class SymbolModality(modality.Modality):
               logits, body_output_shape[:-1] + [1, self._vocab_size])
 
 
+@registry.register_symbol_modality("weights_all")
+class SymbolModalityWeightsAll(SymbolModality):
+  """SymbolModality for features that do not have 0-padding."""
+
+  @property
+  def targets_weights_fn(self):
+    return common_layers.weights_all
+
+
 @registry.register_symbol_modality("ctc")
 class CTCSymbolModality(SymbolModality):
   """SymbolModality that uses CTC loss."""
@@ -529,7 +538,8 @@ class VideoModality(modality.Modality):
       reshape_shape = body_output_shape[:3]
       reshape_shape.extend([num_channels, num_frames, self.top_dimensionality])
       res = tf.layers.dense(
-          body_output, self.top_dimensionality * num_channels * num_frames)
+          body_output, self.top_dimensionality * num_channels * num_frames,
+          use_bias=False)
       res = tf.reshape(res, reshape_shape)
       res = tf.transpose(res, [0, 4, 1, 2, 3, 5])
       if not tf.get_variable_scope().reuse:
@@ -542,11 +552,12 @@ class VideoModality(modality.Modality):
     """Compute loss numerator and denominator for one shard of output."""
     logits = tf.reshape(logits, [-1] + common_layers.shape_list(logits)[2:])
     targets = tf.reshape(targets, [-1] + common_layers.shape_list(targets)[2:])
+    cutoff = getattr(self._model_hparams, "video_modality_loss_cutoff", 0.01)
     return common_layers.padded_cross_entropy(
         logits,
         targets,
         self._model_hparams.label_smoothing,
-        cutoff=0.01,
+        cutoff=cutoff,
         weights_fn=self.targets_weights_fn)
 
 
@@ -569,7 +580,7 @@ class VideoModalityL1(VideoModality):
 
   @property
   def cutoff(self):
-    return 0.2
+    return getattr(self._model_hparams, "video_modality_loss_cutoff", 0.2)
 
   def internal_loss(self, logits, targets):
     return tf.nn.relu(tf.abs(logits - targets) - self.cutoff)
@@ -699,6 +710,9 @@ class RealL2LossModality(RealModality):
 
   def loss(self, top_out, targets):
     predictions = top_out
+    if (len(common_layers.shape_list(top_out)) != len(
+        common_layers.shape_list(targets))):
+      predictions = tf.squeeze(top_out, axis=[-1])
     with tf.name_scope("l2"):
       weights = self.targets_weights_fn(targets)
       l2 = tf.pow(predictions - targets, 2)
@@ -711,9 +725,11 @@ class RealLogPoissonLossModality(RealModality):
 
   def loss(self, top_out, targets):
     predictions = top_out
+    if (len(common_layers.shape_list(top_out)) != len(
+        common_layers.shape_list(targets))):
+      predictions = tf.squeeze(top_out, axis=[-1])
     with tf.name_scope("log_possion"):
       weights = self.targets_weights_fn(targets)
-
       lp_loss = tf.nn.log_poisson_loss(targets, predictions)
       return tf.reduce_sum(lp_loss * weights), tf.reduce_sum(weights)
 
