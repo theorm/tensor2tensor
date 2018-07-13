@@ -33,9 +33,6 @@ import os
 import random
 import tempfile
 
-# Dependency imports
-
-
 import numpy as np
 
 from tensor2tensor import problems as problems_lib  # pylint: disable=unused-import
@@ -48,6 +45,7 @@ from tensor2tensor.utils import registry
 from tensor2tensor.utils import usr_dir
 
 import tensorflow as tf
+
 
 flags = tf.flags
 FLAGS = flags.FLAGS
@@ -151,7 +149,7 @@ def main(_):
     problems = [p for p in problems if "timit" not in p]
   # Remove parsing if paths are not given.
   if not FLAGS.parsing_path:
-    problems = [p for p in problems if "parsing" not in p]
+    problems = [p for p in problems if "parsing_english_ptb" not in p]
 
   if not problems:
     problems_str = "\n  * ".join(

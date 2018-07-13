@@ -18,7 +18,6 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-# Dependency imports
 import tensorflow as tf
 
 flags = tf.flags
@@ -88,6 +87,9 @@ flags.DEFINE_bool("log_device_placement", False,
 flags.DEFINE_integer("local_eval_frequency", 1000,
                      "Save checkpoints and run evaluation every N steps during "
                      "local training.")
+flags.DEFINE_integer("eval_throttle_seconds", 600,
+                     "Do not re-evaluate unless the last evaluation was started"
+                     " at least this many seconds ago.")
 flags.DEFINE_bool("locally_shard_to_cpu", False,
                   "Use CPU as a sharding device running locally. This allows "
                   "to test sharded model construction on a machine with 1 GPU.")

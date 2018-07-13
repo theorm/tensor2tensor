@@ -126,9 +126,12 @@ few steps (e.g., `--train_steps=2000`).
 
 For speech-to-text, we have these data-sets in T2T:
 
-* Librispeech (English speech to text): `--problem=librispeech` for
+* Librispeech (US English): `--problem=librispeech` for
     the whole set and `--problem=librispeech_clean` for a smaller
     but nicely filtered part.
+
+* Mozilla Common Voice (US English): `--problem=common_voice` for the whole set
+    `--problem=common_voice_clean` for a quality-checked subset.
 
 ### Summarization
 
@@ -153,7 +156,9 @@ There are a number of translation data-sets in T2T:
 
 You can get translations in the other direction by appending `_rev` to
 the problem name, e.g., for German-English use
-`--problem=translate_ende_wmt32k_rev`.
+`--problem=translate_ende_wmt32k_rev`
+(note that you still need to download the original data with t2t-datagen
+`--problem=translate_ende_wmt32k`).
 
 For all translation problems, we suggest to try the Transformer model:
 `--model=transformer`. At first it is best to try the base setting,

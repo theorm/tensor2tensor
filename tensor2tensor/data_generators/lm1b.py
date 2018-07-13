@@ -20,9 +20,6 @@ from __future__ import print_function
 
 import os
 import tarfile
-
-# Dependency imports
-
 from six.moves import range  # pylint: disable=redefined-builtin
 
 from tensor2tensor.data_generators import generator_utils
@@ -177,6 +174,10 @@ class LanguagemodelLm1bCharacters(LanguagemodelLm1b32k):
   @property
   def vocab_type(self):
     return text_problems.VocabType.CHARACTER
+
+  @property
+  def task_id(self):
+    return problem.SpaceID.EN_CHR
 
 
 @registry.register_problem

@@ -13,14 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Discretization bottlenecks used to train discrete latent variables."""
-
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
+
 from functools import partial
-# Dependency imports
+
 from tensor2tensor.layers import common_layers
+
 import tensorflow as tf
+
 from tensorflow.python.training import moving_averages
 
 
@@ -195,6 +197,15 @@ def int_to_bit(x_int, num_bits, base=2):
   return tf.to_float(res)
 
 
+def int_to_bit_embed(x_int, num_bits, embedding_size, base=2):
+  """Turn x_int into a bitwise (lower-endian) tensor and embed densly."""
+  shape = common_layers.shape_list(x_int)
+  inputs = int_to_bit(x_int, num_bits, base=base)
+  inputs = tf.reshape(inputs, shape[:-1] + [shape[-1] * 8])
+  inputs = 2.0 * tf.to_float(inputs) - 1.0  # Move from 0/1 to -1/1.
+  return tf.layers.dense(inputs, embedding_size, name="int_to_bit_embed")
+
+
 def embed(x,
           hidden_size,
           z_size,
@@ -280,8 +291,7 @@ def embed(x,
     else:
       raise ValueError("Unknown bottleneck kind.")
 
-    h2 = tf.layers.dense(tf.nn.relu(h1), filter_size, name="vch2")
-    return tf.layers.dense(tf.nn.relu(h2), hidden_size, name="vcfin")
+    return h1
 
 
 def vae(x, name, z_size):
@@ -639,8 +649,7 @@ def discrete_bottleneck(x,
     else:
       raise ValueError("Unknown discretization method.")
 
-    h2 = tf.layers.dense(tf.nn.relu(h1), filter_size, name="vch2")
-    res = tf.layers.dense(tf.nn.relu(h2), hidden_size, name="vcfin")
+    res = h1
 
     embed_fn = partial(
         embed,
@@ -663,10 +672,220 @@ def discrete_bottleneck(x,
 # * The [method]_unbottleneck function moves from discretized state to dense.
 
 
-def tanh_discrete_bottleneck(x, bottleneck_size, bottleneck_noise,
+def get_vq_bottleneck(bottleneck_size, hidden_size):
+  """Get lookup table for VQ bottleneck."""
+  with tf.variable_scope("vq", reuse=tf.AUTO_REUSE):
+    means = tf.get_variable(
+        name="means",
+        shape=[bottleneck_size, hidden_size],
+        initializer=tf.uniform_unit_scaling_initializer())
+
+    ema_count = tf.get_variable(
+        name="ema_count",
+        shape=[bottleneck_size],
+        initializer=tf.constant_initializer(0),
+        trainable=False)
+
+    with tf.colocate_with(means):
+      ema_means = tf.get_variable(
+          name="ema_means",
+          initializer=means.initialized_value(),
+          trainable=False)
+
+  return means, ema_means, ema_count
+
+
+def vq_nearest_neighbor(x, means, soft_em=False, num_samples=10):
+  """Find the nearest element in means to elements in x."""
+  bottleneck_size = common_layers.shape_list(means)[0]
+  x_norm_sq = tf.reduce_sum(tf.square(x), axis=-1, keepdims=True)
+  means_norm_sq = tf.reduce_sum(tf.square(means), axis=-1, keepdims=True)
+  scalar_prod = tf.matmul(x, means, transpose_b=True)
+  dist = x_norm_sq + tf.transpose(means_norm_sq) - 2 * scalar_prod
+  if soft_em:
+    x_means_idx = tf.multinomial(-dist, num_samples=num_samples)
+    x_means_hot = tf.one_hot(
+        x_means_idx, depth=common_layers.shape_list(means)[0])
+    x_means_hot = tf.reduce_mean(x_means_hot, axis=1)
+  else:
+    x_means_idx = tf.argmax(-dist, axis=-1)
+    x_means_hot = tf.one_hot(x_means_idx, bottleneck_size)
+  x_means_hot_flat = tf.reshape(x_means_hot, [-1, bottleneck_size])
+  x_means = tf.matmul(x_means_hot_flat, means)
+  e_loss = tf.reduce_mean(tf.square(x - tf.stop_gradient(x_means)))
+  return x_means_hot, e_loss
+
+
+def vq_discrete_bottleneck(x,
+                           bottleneck_bits,
+                           beta=0.25,
+                           decay=0.999,
+                           epsilon=1e-5,
+                           soft_em=False,
+                           num_samples=10):
+  """Simple vector quantized discrete bottleneck."""
+  bottleneck_size = 2**bottleneck_bits
+  x_shape = common_layers.shape_list(x)
+  hidden_size = x_shape[-1]
+  means, ema_means, ema_count = get_vq_bottleneck(bottleneck_size, hidden_size)
+  x = tf.reshape(x, [-1, hidden_size])
+  x_means_hot, e_loss = vq_nearest_neighbor(
+      x, means, soft_em=soft_em, num_samples=num_samples)
+
+  # Update the ema variables
+  updated_ema_count = moving_averages.assign_moving_average(
+      ema_count,
+      tf.reduce_sum(
+          tf.reshape(x_means_hot, shape=[-1, bottleneck_size]), axis=0),
+      decay,
+      zero_debias=False)
+
+  dw = tf.matmul(x_means_hot, x, transpose_a=True)
+  updated_ema_means = tf.identity(moving_averages.assign_moving_average(
+      ema_means, dw, decay, zero_debias=False))
+  n = tf.reduce_sum(updated_ema_count, axis=-1, keepdims=True)
+  updated_ema_count = (
+      (updated_ema_count + epsilon) / (n + bottleneck_size * epsilon) * n)
+  updated_ema_means /= tf.expand_dims(updated_ema_count, axis=-1)
+  with tf.control_dependencies([e_loss]):
+    update_means = means.assign(updated_ema_means)
+    with tf.control_dependencies([update_means]):
+      loss = beta * e_loss
+
+  d = tf.reshape(x_means_hot, x_shape[:-1] + [bottleneck_size])
+  return d, loss
+
+
+def vq_discrete_unbottleneck(x, hidden_size):
+  """Simple undiscretization from vector quantized representation."""
+  x_shape = common_layers.shape_list(x)
+  x = tf.to_float(x)
+  bottleneck_size = common_layers.shape_list(x)[-1]
+  means, _, _ = get_vq_bottleneck(bottleneck_size, hidden_size)
+  result = tf.matmul(tf.reshape(x, [-1, x_shape[-1]]), means)
+  return tf.reshape(result, x_shape[:-1] + [hidden_size])
+
+
+def gumbel_softmax_discrete_bottleneck(x,
+                                       bottleneck_bits,
+                                       beta=0.25,
+                                       decay=0.999,
+                                       epsilon=1e-5,
+                                       startup_steps=15000,
+                                       hard=False,
+                                       summary=True):
+  """VQ-VAE using Gumbel-Softmax.
+
+  Different from `gumbel_softmax()` function as
+  this function calculates the KL by using the discrete entropy
+  instead of taking the argmax, and it also uses an exponential moving average
+  to update the codebook while the `gumbel_softmax()` function includes no
+  codebook update.
+
+  Args:
+    x: A `float`-like `Tensor` containing the latent vectors to be compared to
+      the codebook, whose squared difference is used as the Gumbel-Softmax
+      logits.
+    bottleneck_bits: An `int` that sets the size of the bottleneck in `log_2`.
+    beta: Beta factor for commitment loss (Default: 0.25).
+    decay: Decay factor for exponential moving average (Default: 0.999).
+    epsilon: Small value to avoid dividing by zero in EMA update
+      (Default: 1e-5).
+    startup_steps: Number of steps for KL warmup (Default: 25000).
+    hard: When `True`, we use hard Gumbel-Softmax samples and force
+      discrete latents by taking the argmax. When `False`, we use soft samples,
+      which we treat as codebook weights (Default: False).
+    summary: When `True`, we save histogram summaries of the KL term (Default:
+      True).
+
+  Returns:
+    x_means_assignments: A `float`-like `Tensor` containing the codebook
+      assignments. When `hard == True`, this is one-hot, containing the arg-max
+      of the Gumbel-Softmax samples (and we use the straightthrough gradient).
+      Otherwise, it contains the Gumbel-Softmax samples exactly, which are
+      values from the `(K-1)`-simplex where `K` is the bottleneck size.
+    loss: The loss, which is the sum of the KL between the Gumbel-Softmax and
+      the uniform prior and the commitment loss multiplied by the beta factor.
+      We approximate the KL by using the entropy of a categorical distribution
+      instead of the Gumbel Softmax.
+
+  """
+  bottleneck_size = 2**bottleneck_bits
+  x_shape = common_layers.shape_list(x)
+  hidden_size = x_shape[-1]
+  means, ema_means, ema_count = get_vq_bottleneck(bottleneck_size, hidden_size)
+  x = tf.reshape(x, [-1, hidden_size])
+
+  bottleneck_size = common_layers.shape_list(means)[0]
+  x_norm_sq = tf.reduce_sum(tf.square(x), axis=-1, keepdims=True)
+  means_norm_sq = tf.reduce_sum(tf.square(means), axis=-1, keepdims=True)
+  scalar_prod = tf.matmul(x, means, transpose_b=True)
+  dist = x_norm_sq + tf.transpose(means_norm_sq) - 2 * scalar_prod
+
+  class_probs = tf.nn.softmax(dist)
+  log_class_probs = tf.nn.log_softmax(dist)
+  gumbel_samples = gumbel_sample(common_layers.shape_list(dist))
+  gumbel_samples *= common_layers.inverse_exp_decay(startup_steps // 5) * 0.5
+  temperature = 1.2 - common_layers.inverse_lin_decay(startup_steps)
+
+  # 10% of the time keep reasonably high temperature to keep learning.
+  temperature = tf.cond(
+      tf.less(tf.random_uniform([]), 0.9), lambda: temperature,
+      lambda: tf.random_uniform([], minval=0.5, maxval=1.0))
+  gumbel_softmax_samples = tf.nn.softmax(
+      (log_class_probs + gumbel_samples) / temperature)
+
+  # Calculate KL between q and a uniform prior.
+  kl = tf.reduce_sum(class_probs * (log_class_probs -
+                                    tf.log(1.0/bottleneck_size)), -1)
+  if summary:
+    tf.summary.histogram("KL", tf.reshape(kl, [-1]))
+
+  # Straight-through gradient estimation when we're using hard assignments.
+  if hard:
+    x_means_idx = tf.reshape(tf.argmax(gumbel_softmax_samples, axis=-1), [-1])
+    x_means_hot = tf.one_hot(x_means_idx, bottleneck_size)
+    x_means_assignments = gumbel_softmax_samples + tf.stop_gradient(
+        x_means_hot - gumbel_softmax_samples)
+  else:
+    x_means_assignments = gumbel_softmax_samples
+  x_means_assignments_flat = tf.reshape(
+      x_means_assignments, [-1, bottleneck_size])
+  x_means = tf.matmul(x_means_assignments_flat, means)
+  commitment_loss = tf.reduce_mean(tf.square(x - tf.stop_gradient(x_means)))
+
+  # Update the ema variables.
+  updated_ema_count = moving_averages.assign_moving_average(
+      ema_count,
+      tf.reduce_sum(
+          tf.reshape(x_means_assignments, shape=[-1, bottleneck_size]), axis=0),
+      decay,
+      zero_debias=False)
+
+  dw = tf.matmul(x_means_assignments, x, transpose_a=True)
+  updated_ema_means = tf.identity(moving_averages.assign_moving_average(
+      ema_means, dw, decay, zero_debias=False))
+  n = tf.reduce_sum(updated_ema_count, axis=-1, keepdims=True)
+  updated_ema_count = (
+      (updated_ema_count + epsilon) / (n + bottleneck_size * epsilon) * n)
+  updated_ema_means /= tf.expand_dims(updated_ema_count, axis=-1)
+  with tf.control_dependencies([commitment_loss]):
+    update_means = means.assign(updated_ema_means)
+    with tf.control_dependencies([update_means]):
+      loss = beta * commitment_loss
+
+  # Add KL loss.
+  loss += tf.reduce_mean(kl)
+
+  x_means_assignments = tf.reshape(
+      x_means_assignments, x_shape[:-1] + [bottleneck_size])
+  return x_means_assignments, loss
+
+
+def tanh_discrete_bottleneck(x, bottleneck_bits, bottleneck_noise,
                              discretize_warmup_steps, mode):
   """Simple discretization through tanh, flip bottleneck_noise many bits."""
-  x = tf.tanh(tf.layers.dense(x, bottleneck_size,
+  x = tf.tanh(tf.layers.dense(x, bottleneck_bits,
                               name="tanh_discrete_bottleneck"))
   d = x + tf.stop_gradient(2.0 * tf.to_float(tf.less(0.0, x)) - 1.0 - x)
   if mode == tf.estimator.ModeKeys.TRAIN:
@@ -675,7 +894,7 @@ def tanh_discrete_bottleneck(x, bottleneck_size, bottleneck_noise,
     d *= noise
   d = common_layers.mix(d, x, discretize_warmup_steps,
                         mode == tf.estimator.ModeKeys.TRAIN)
-  return d
+  return d, 0.0
 
 
 def tanh_discrete_unbottleneck(x, hidden_size):
@@ -684,12 +903,12 @@ def tanh_discrete_unbottleneck(x, hidden_size):
   return x
 
 
-def isemhash_bottleneck(x, bottleneck_size, bottleneck_noise,
+def isemhash_bottleneck(x, bottleneck_bits, bottleneck_noise,
                         discretize_warmup_steps, mode,
                         isemhash_noise_dev=0.5, isemhash_mix_prob=0.5):
   """Improved semantic hashing bottleneck."""
   with tf.variable_scope("isemhash_bottleneck"):
-    x = tf.layers.dense(x, bottleneck_size, name="dense")
+    x = tf.layers.dense(x, bottleneck_bits, name="dense")
     y = common_layers.saturating_sigmoid(x)
     if isemhash_noise_dev > 0 and mode == tf.estimator.ModeKeys.TRAIN:
       noise = tf.truncated_normal(
@@ -704,7 +923,7 @@ def isemhash_bottleneck(x, bottleneck_size, bottleneck_noise,
       d = common_layers.mix(d, 2.0 * y - 1.0, discretize_warmup_steps,
                             mode == tf.estimator.ModeKeys.TRAIN,
                             max_prob=isemhash_mix_prob)
-    return d
+    return d, 0.0
 
 
 def isemhash_unbottleneck(x, hidden_size, isemhash_filter_size_multiplier=1.0):
@@ -722,13 +941,32 @@ def parametrized_bottleneck(x, hparams):
   """Meta-function calling all the above bottlenecks with hparams."""
   if hparams.bottleneck_kind == "tanh_discrete":
     return tanh_discrete_bottleneck(
-        x, hparams.bottleneck_size, hparams.bottleneck_noise * 0.5,
+        x, hparams.bottleneck_bits, hparams.bottleneck_noise * 0.5,
         hparams.discretize_warmup_steps, hparams.mode)
   if hparams.bottleneck_kind == "isemhash":
     return isemhash_bottleneck(
-        x, hparams.bottleneck_size, hparams.bottleneck_noise * 0.5,
+        x, hparams.bottleneck_bits, hparams.bottleneck_noise * 0.5,
         hparams.discretize_warmup_steps, hparams.mode,
         hparams.isemhash_noise_dev, hparams.isemhash_mix_prob)
+  if hparams.bottleneck_kind == "vq":
+    return vq_discrete_bottleneck(x, hparams.bottleneck_bits, hparams.vq_beta,
+                                  hparams.vq_decay, hparams.vq_epsilon)
+  if hparams.bottleneck_kind == "em":
+    return vq_discrete_bottleneck(
+        x,
+        hparams.bottleneck_bits,
+        hparams.vq_beta,
+        hparams.vq_decay,
+        hparams.vq_epsilon,
+        soft_em=True,
+        num_samples=hparams.vq_num_samples)
+  if hparams.bottleneck_kind == "gumbel_softmax":
+    return gumbel_softmax_discrete_bottleneck(x, hparams.bottleneck_bits,
+                                              hparams.vq_beta, hparams.vq_decay,
+                                              hparams.vq_epsilon,
+                                              hparams.startup_steps, hard=False,
+                                              summary=True)
+
   raise ValueError("Unsupported hparams.bottleneck_kind %s"
                    % hparams.bottleneck_kind)
 
@@ -740,5 +978,7 @@ def parametrized_unbottleneck(x, hidden_size, hparams):
   if hparams.bottleneck_kind == "isemhash":
     return isemhash_unbottleneck(
         x, hidden_size, hparams.isemhash_filter_size_multiplier)
+  if hparams.bottleneck_kind in ["vq", "em", "gumbel_softmax"]:
+    return vq_discrete_unbottleneck(x, hidden_size)
   raise ValueError("Unsupported hparams.bottleneck_kind %s"
                    % hparams.bottleneck_kind)

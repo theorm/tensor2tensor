@@ -25,13 +25,11 @@ import random
 import stat
 import tarfile
 import tempfile
-
-# Dependency imports
-
 import requests
 import six
 from six.moves import range  # pylint: disable=redefined-builtin
-import six.moves.urllib_request as urllib  # Imports urllib on Python2, urllib.request on Python3
+# Imports urllib on Python2, urllib.request on Python3
+import six.moves.urllib_request as urllib
 
 from tensor2tensor.data_generators import text_encoder
 
@@ -147,7 +145,8 @@ def generate_files(generator, output_filenames,
       switching to the next shard; by default set to 1, switch every case.
   """
   if outputs_exist(output_filenames):
-    tf.logging.info("Skipping generator because outputs files exist")
+    tf.logging.info("Skipping generator because outputs files exists at {}"
+                    .format(output_filenames))
     return
   tmp_filenames = [fname + ".incomplete" for fname in output_filenames]
   num_shards = len(output_filenames)
@@ -156,7 +155,7 @@ def generate_files(generator, output_filenames,
   for case in generator:
     if case is None:
       continue
-    if counter > 0 and counter % 100000 == 0:
+    if counter % 100000 == 0:
       tf.logging.info("Generating case %d." % counter)
     counter += 1
     if max_cases and counter > max_cases:
@@ -205,29 +204,28 @@ def maybe_download(directory, filename, uri):
   Returns:
     The path to the downloaded file.
   """
-  if not tf.gfile.Exists(directory):
-    tf.logging.info("Creating directory %s" % directory)
-    tf.gfile.MakeDirs(directory)
+  tf.gfile.MakeDirs(directory)
   filepath = os.path.join(directory, filename)
-  if not tf.gfile.Exists(filepath):
-    tf.logging.info("Downloading %s to %s" % (uri, filepath))
-    try:
-      tf.gfile.Copy(uri, filepath)
-    except tf.errors.UnimplementedError:
-      if uri.startswith("http"):
-        inprogress_filepath = filepath + ".incomplete"
-        inprogress_filepath, _ = urllib.urlretrieve(
-            uri, inprogress_filepath, reporthook=download_report_hook)
-        # Print newline to clear the carriage return from the download progress
-        print()
-        tf.gfile.Rename(inprogress_filepath, filepath)
-      else:
-        raise ValueError("Unrecognized URI: " + filepath)
-    statinfo = os.stat(filepath)
-    tf.logging.info("Successfully downloaded %s, %s bytes." %
-                    (filename, statinfo.st_size))
-  else:
+  if tf.gfile.Exists(filepath):
     tf.logging.info("Not downloading, file already found: %s" % filepath)
+    return filepath
+
+  tf.logging.info("Downloading %s to %s" % (uri, filepath))
+  try:
+    tf.gfile.Copy(uri, filepath)
+  except tf.errors.UnimplementedError:
+    if uri.startswith("http"):
+      inprogress_filepath = filepath + ".incomplete"
+      inprogress_filepath, _ = urllib.urlretrieve(
+          uri, inprogress_filepath, reporthook=download_report_hook)
+      # Print newline to clear the carriage return from the download progress
+      print()
+      tf.gfile.Rename(inprogress_filepath, filepath)
+    else:
+      raise ValueError("Unrecognized URI: " + filepath)
+  statinfo = os.stat(filepath)
+  tf.logging.info("Successfully downloaded %s, %s bytes." %
+                  (filename, statinfo.st_size))
   return filepath
 
 
@@ -484,6 +482,7 @@ def _shuffle_single(fname):
 
 
 def shuffle_dataset(filenames):
+  """Shuffles the dataset."""
   if outputs_exist(filenames):
     tf.logging.info("Skipping shuffle because output files exist")
     return
@@ -493,6 +492,7 @@ def shuffle_dataset(filenames):
     pool.map(_shuffle_single, filenames)
   else:
     _shuffle_single(filenames[0])
+  tf.logging.info("Data shuffled.")
 
 
 class SequencePacker(object):

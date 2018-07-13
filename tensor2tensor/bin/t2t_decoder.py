@@ -32,10 +32,8 @@ from __future__ import division
 from __future__ import print_function
 
 import os
-
-# Dependency imports
-
 from tensor2tensor.bin import t2t_trainer
+from tensor2tensor.data_generators import problem  # pylint: disable=unused-import
 from tensor2tensor.data_generators import text_encoder
 from tensor2tensor.utils import decoding
 from tensor2tensor.utils import registry
@@ -62,6 +60,7 @@ flags.DEFINE_bool("decode_interactive", False,
 flags.DEFINE_integer("decode_shards", 1, "Number of decoding replicas.")
 flags.DEFINE_string("score_file", "", "File to score. Each line in the file "
                     "must be in the format input \t target.")
+flags.DEFINE_bool("decode_in_memory", False, "Decode in memory.")
 
 
 def create_hparams():
@@ -74,12 +73,13 @@ def create_hparams():
 
 def create_decode_hparams():
   decode_hp = decoding.decode_hparams(FLAGS.decode_hparams)
-  decode_hp.add_hparam("shards", FLAGS.decode_shards)
-  decode_hp.add_hparam("shard_id", FLAGS.worker_id)
+  decode_hp.shards = FLAGS.decode_shards
+  decode_hp.shard_id = FLAGS.worker_id
   return decode_hp
 
 
 def decode(estimator, hparams, decode_hp):
+  """Decode from estimator. Interactive, from file, or from dataset."""
   if FLAGS.decode_interactive:
     if estimator.config.use_tpu:
       raise ValueError("TPU can only decode from dataset.")
@@ -163,6 +163,7 @@ def main(_):
   tf.logging.set_verbosity(tf.logging.INFO)
   trainer_lib.set_random_seed(FLAGS.random_seed)
   usr_dir.import_usr_dir(FLAGS.t2t_usr_dir)
+
 
   if FLAGS.score_file:
     filename = os.path.expanduser(FLAGS.score_file)
