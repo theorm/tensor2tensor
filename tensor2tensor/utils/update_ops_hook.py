@@ -12,27 +12,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tiny run of model_rl_experiment. Smoke test."""
+"""Hook to run tf.GraphKeys.UPDATE_OPS."""
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from tensor2tensor.rl import model_rl_experiment
-
 import tensorflow as tf
 
-FLAGS = tf.flags.FLAGS
 
+class UpdateOpsHook(tf.train.SessionRunHook):
+  """Hook to run assign_ops."""
 
-class ModelRLExperimentStochasticTest(tf.test.TestCase):
-
-  def test_stochastic(self):
-    FLAGS.output_dir = tf.test.get_temp_dir()
-    FLAGS.loop_hparams_set = "rl_modelrl_tiny_stochastic"
-    FLAGS.loop_hparams = "generative_model_params=next_frame_stochastic_tiny"
-    FLAGS.schedule = "train"  # skip evaluation for world model training
-    model_rl_experiment.main(None)
-
-
-if __name__ == "__main__":
-  tf.test.main()
+  def before_run(self, run_context):
+    del run_context
+    update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+    return tf.train.SessionRunArgs(update_ops)

@@ -248,6 +248,33 @@ def basic_params1():
       #   roundoff.  Initial experiments show that model quality is similar
       #   to baseline for about 3M training steps, but worse thereafter.
       weight_dtype="float32",
+      # Directory containing a checkpoint for a pretrained model. This will only
+      # be used if a new run is being started. Parameters not found in the
+      # pretrained model will be randomly initialized. Superfluous parameters in
+      # the pretrained model will be ignored.
+      pretrained_model_dir="",
+      # Threshold used for two cases: the primary task probability for the
+      # constant mixing schedule, and the exponential schedule limit for when
+      # mixing should stop (eg: 0.5 means stop at 50-50 mixing, 0.8 means stop
+      # at 20-80 mixing for the primary-others mixing case.)
+      multiproblem_schedule_threshold=0.5,
+      # The number of examples at which the proportion of the mixed in datasets
+      # is multiproblem_schedule_threshold
+      multiproblem_schedule_max_examples=1e7,
+      # When training multiproblems, we can mix the data according to different
+      # schedules. Example: a constant schedule mixing 20-80 between the primary
+      # and other tasks.
+      # A list of supported schedules can be found in
+      # `data_generators.multi_problem.py`.
+      multiproblem_mixing_schedule="constant",
+      # A scalar to upweight the classifier loss in a multiproblem setting.
+      multiproblem_class_loss_multiplier=0.0,
+      # A boolean that decides whether input sequence losses and target label
+      # losses in classification problems should be reweighted.
+      multiproblem_reweight_label_loss=False,
+      # How much weight the targets in classification problems receive. Inputs
+      # receive 1 minus this weight.
+      multiproblem_label_weight=0.5
   )
 
 

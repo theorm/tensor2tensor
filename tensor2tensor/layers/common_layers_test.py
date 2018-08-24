@@ -417,6 +417,31 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
       actual = session.run(y)
     self.assertEqual(actual.shape, (5, 2, 1, 12))
 
+  def testNAC(self):
+    with self.test_session() as session:
+      x = np.random.rand(5, 2, 1, 12)
+      y = common_layers.nac(tf.constant(x, dtype=tf.float32), 14)
+      session.run(tf.global_variables_initializer())
+      actual = session.run(y)
+    self.assertEqual(actual.shape, (5, 2, 1, 14))
+
+  def testNALU(self):
+    with self.test_session() as session:
+      x = np.random.rand(5, 2, 1, 12)
+      y = common_layers.nalu(tf.constant(x, dtype=tf.float32), 14)
+      session.run(tf.global_variables_initializer())
+      actual = session.run(y)
+    self.assertEqual(actual.shape, (5, 2, 1, 14))
+
+  def testNALUzeros(self):
+    with self.test_session() as session:
+      x = np.random.rand(5, 2, 1, 12)
+      y = common_layers.nalu(tf.zeros_like(x, dtype=tf.float32), 14)
+      session.run(tf.global_variables_initializer())
+      actual = session.run(y)
+    self.assertTrue(np.all(np.isfinite(actual)))
+    self.assertEqual(actual.shape, (5, 2, 1, 14))
+
   def testPaddingCrossEntropyFactored(self):
     vocab_size = 19
     rows = 5
@@ -626,6 +651,90 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     self.assertAllClose(dnorm_scale, dnorm_scale_f)
     self.assertAllClose(dnorm_bias, dnorm_bias_f)
     self.assertAllClose(dx, dx_f)
+
+  def testCycleGANUpsampleNnUpsampleConv(self):
+    batch = 8
+    height = 32
+    width = 32
+    num_channels = 3
+    output_filters = 10
+    stride = [2, 3]  # we want height to be x2 and width to be x3
+    random_input = np.random.rand(batch, height, width, num_channels).astype(
+        np.float32)
+
+    # nn_upsample_conv gives exactly the shapes we'd expect.
+    upsampled_output = common_layers.cyclegan_upsample(
+        random_input, output_filters, stride, "nn_upsample_conv")
+    upsampled_output_shape = tf.shape(upsampled_output)
+    with self.test_session() as session:
+      session.run(tf.global_variables_initializer())
+      self.assertAllEqual(
+          [batch, height * stride[0], width * stride[1], output_filters],
+          session.run(upsampled_output_shape))
+
+  def testCycleGANUpsampleBilinearUpsampleConv(self):
+    batch = 8
+    height = 32
+    width = 32
+    num_channels = 3
+    output_filters = 10
+    stride = [2, 3]  # we want height to be x2 and width to be x3
+    random_input = np.random.rand(batch, height, width, num_channels).astype(
+        np.float32)
+
+    # bilinear_upsample_conv gives exactly the shapes we'd expect.
+    upsampled_output = common_layers.cyclegan_upsample(
+        random_input, output_filters, stride, "bilinear_upsample_conv")
+    upsampled_output_shape = tf.shape(upsampled_output)
+    with self.test_session() as session:
+      session.run(tf.global_variables_initializer())
+      self.assertAllEqual(
+          [batch, height * stride[0], width * stride[1], output_filters],
+          session.run(upsampled_output_shape))
+
+  def testCycleGANUpsampleConv2dTranspose(self):
+    batch = 8
+    height = 32
+    width = 32
+    num_channels = 3
+    output_filters = 10
+    stride = [2, 3]  # we want height to be x2 and width to be x3
+    random_input = np.random.rand(batch, height, width, num_channels).astype(
+        np.float32)
+
+    # conv2d_transpose is a little tricky.
+    # height_new = (height_old - 1) * stride + kernel - 2*padding - correction
+    # here kernel = 3, padding = 0, correction = 1
+    upsampled_height = (height - 1) * stride[0] + 3 - 2*0 - 1
+    upsampled_width = (width - 1) * stride[1] + 3 - 2*0 - 1
+    upsampled_output = common_layers.cyclegan_upsample(random_input,
+                                                       output_filters, stride,
+                                                       "conv2d_transpose")
+    upsampled_output_shape = tf.shape(upsampled_output)
+    with self.test_session() as session:
+      session.run(tf.global_variables_initializer())
+      self.assertAllEqual(
+          [batch, upsampled_height, upsampled_width, output_filters],
+          session.run(upsampled_output_shape))
+
+  def testSpectralNorm(self):
+    # Test that after 20 calls to apply_spectral_norm, the spectral
+    # norm of the normalized matrix is close to 1.0
+    with tf.Graph().as_default():
+      weights = tf.get_variable("w", dtype=tf.float32, shape=[2, 3, 50, 100])
+      weights = tf.multiply(weights, 10.0)
+      normed_weight, assign_op = common_layers.apply_spectral_norm(weights)
+
+      with tf.Session() as sess:
+        sess.run(tf.global_variables_initializer())
+
+        for _ in range(20):
+          sess.run(assign_op)
+          normed_weight, assign_op = common_layers.apply_spectral_norm(
+              weights)
+        normed_weight = sess.run(normed_weight).reshape(-1, 100)
+        _, s, _ = np.linalg.svd(normed_weight)
+        self.assertTrue(np.allclose(s[0], 1.0, rtol=0.1))
 
 
 class FnWithCustomGradTest(tf.test.TestCase):

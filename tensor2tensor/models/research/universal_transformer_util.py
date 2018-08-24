@@ -48,6 +48,8 @@ from __future__ import print_function
 import copy
 import functools
 
+from six.moves import range  # pylint: disable=redefined-builtin
+
 from tensor2tensor.layers import common_attention
 from tensor2tensor.layers import common_layers
 from tensor2tensor.models import transformer
@@ -102,7 +104,7 @@ def universal_transformer_encoder(encoder_input,
           encoder_self_attention_bias)
       nonpadding = 1.0 - padding
     pad_remover = None
-    if hparams.use_pad_remover and not common_layers.is_on_tpu():
+    if hparams.use_pad_remover and not common_layers.is_xla_compiled():
       pad_remover = expert_utils.PadRemover(padding)
 
     ffn_unit = functools.partial(
@@ -195,7 +197,7 @@ def universal_transformer_layer(x,
                                 ffn_unit,
                                 attention_unit,
                                 pad_remover=None):
-  """Core function applying the universal transforemr layer.
+  """Core function applying the universal transformer layer.
 
   Args:
     x: input
@@ -227,7 +229,7 @@ def universal_transformer_layer(x,
       # and add position timing signal at the beginning of each step, so for
       # the vanilla transformer, we need to add timing signal here.
       x = common_attention.add_timing_signal_1d(x)
-    for layer in xrange(num_layers):
+    for layer in range(num_layers):
       with tf.variable_scope("layer_%d" % layer):
         x = ffn_unit(attention_unit(x))
     return x
@@ -576,7 +578,8 @@ def universal_transformer_basic(layer_inputs,
     layer_output:
          new_state: new state
   """
-  state, inputs, memory = layer_inputs
+  state, inputs, memory = tf.unstack(layer_inputs, num=None, axis=0,
+                                     name="unstack")
   state = step_preprocess(state, step, hparams)
 
   new_state = ffn_unit(attention_unit(state))

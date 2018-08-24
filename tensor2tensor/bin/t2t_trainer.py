@@ -30,8 +30,9 @@ from tensor2tensor.utils import flags as t2t_flags  # pylint: disable=unused-imp
 from tensor2tensor.utils import registry
 from tensor2tensor.utils import trainer_lib
 from tensor2tensor.utils import usr_dir
-
 import tensorflow as tf
+
+from tensorflow.contrib.tpu.python.tpu import tpu_config
 
 flags = tf.flags
 FLAGS = flags.FLAGS
@@ -48,6 +49,9 @@ flags.DEFINE_integer("tpu_num_shards", 8, "Number of tpu shards.")
 flags.DEFINE_integer("iterations_per_loop", 100,
                      "Number of iterations in a TPU training loop.")
 flags.DEFINE_bool("use_tpu", False, "Whether to use TPU.")
+flags.DEFINE_bool("use_tpu_estimator", False, "Whether to use TPUEstimator. "
+                  "This is always enabled when use_tpu is True.")
+flags.DEFINE_bool("xla_compile", False, "Whether to use XLA to compile graph.")
 flags.DEFINE_integer("tpu_infeed_sleep_secs", None,
                      "How long to sleep the infeed thread.")
 flags.DEFINE_bool("generate_data", False, "Generate data before training?")
@@ -174,6 +178,9 @@ def create_experiment_fn(**kwargs):
       eval_early_stopping_metric_minimize=FLAGS.
       eval_early_stopping_metric_minimize,
       use_tpu=FLAGS.use_tpu,
+      use_tpu_estimator=FLAGS.use_tpu_estimator,
+      use_xla=FLAGS.xla_compile,
+      warm_start_from=FLAGS.warm_start_from,
       **kwargs)
 
 
@@ -191,6 +198,14 @@ def create_run_config(hp):
     save_ckpt_steps = None
   assert FLAGS.output_dir or FLAGS.checkpoint_path
   tpu_config_extra_kwargs = {}
+
+  if getattr(hp, "mtf_mode", False):
+    save_ckpt_steps = None  # Disable the default saver
+    save_ckpt_secs = None  # Disable the default saver
+    tpu_config_extra_kwargs = {
+        "num_cores_per_replica": 1,
+        "per_host_input_for_training": tpu_config.InputPipelineConfig.BROADCAST,
+    }
 
   # the various custom getters we have written do not play well together yet.
   # TODO(noam): ask rsepassi for help here.
@@ -215,6 +230,7 @@ def create_run_config(hp):
       gpu_mem_fraction=FLAGS.worker_gpu_memory_fraction,
       enable_graph_rewriter=FLAGS.enable_graph_rewriter,
       use_tpu=FLAGS.use_tpu,
+      use_tpu_estimator=FLAGS.use_tpu_estimator,
       schedule=FLAGS.schedule,
       no_data_parallelism=hp.no_data_parallelism,
       daisy_chain_variables=daisy_chain_variables,
@@ -229,7 +245,8 @@ def create_run_config(hp):
       inter_op_parallelism_threads=FLAGS.inter_op_parallelism_threads,
       log_step_count_steps=FLAGS.log_step_count_steps,
       intra_op_parallelism_threads=FLAGS.intra_op_parallelism_threads,
-      tpu_config_extra_kwargs=tpu_config_extra_kwargs)
+      tpu_config_extra_kwargs=tpu_config_extra_kwargs,
+      cloud_tpu_name=FLAGS.cloud_tpu_name)
 
 
 def generate_data():
@@ -333,12 +350,18 @@ def maybe_cloud_tpu():
     yield
 
 
+def run_std_server():
+  exp = trainer_lib.T2TExperiment(*([None] * 5))
+  exp.run_std_server()
+
+
 def main(argv):
   tf.logging.set_verbosity(tf.logging.INFO)
+  if FLAGS.schedule == "run_std_server":
+    run_std_server()
   trainer_lib.set_random_seed(FLAGS.random_seed)
   usr_dir.import_usr_dir(FLAGS.t2t_usr_dir)
   maybe_log_registry_and_exit()
-
 
   if FLAGS.cloud_mlengine:
     cloud_mlengine.launch()

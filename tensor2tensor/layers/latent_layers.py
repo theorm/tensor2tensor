@@ -30,17 +30,13 @@ import tensorflow as tf
 DO_SUMMARIES = True
 
 
-def attend(x, source, hparams, name):
+def compress_self_attention_layer(x, hparams, name):
   """Attend function."""
   with tf.variable_scope(name):
-    # x = tf.squeeze(x, axis=2)
     x, xshape, _ = cia.maybe_reshape_4d_to_3d(x)
-    if len(source.get_shape()) > 3:
-      source = tf.squeeze(source, axis=2)
-    source = common_attention.add_timing_signal_1d(source)
     y = common_attention.multihead_attention(
         common_layers.layer_preprocess(x, hparams),
-        source,
+        None,
         None,
         hparams.attention_key_channels or hparams.hidden_size,
         hparams.attention_value_channels or hparams.hidden_size,
@@ -50,7 +46,8 @@ def attend(x, source, hparams, name):
     return tf.reshape(res, xshape)
 
 
-def multinomial_sample(x, vocab_size, sampling_method, temperature):
+def multinomial_sample(x, vocab_size=None, sampling_method="random",
+                       temperature=1.0):
   """Multinomial sampling from a n-dimensional tensor.
 
   Args:
@@ -62,7 +59,8 @@ def multinomial_sample(x, vocab_size, sampling_method, temperature):
   Returns:
     Tensor of shape [...].
   """
-  if sampling_method == "random":
+  vocab_size = vocab_size or common_layers.shape_list(x)[-1]
+  if sampling_method == "random" and temperature > 0.0:
     samples = tf.multinomial(tf.reshape(x, [-1, vocab_size]) / temperature, 1)
   else:
     samples = tf.argmax(x, axis=-1)
@@ -70,19 +68,19 @@ def multinomial_sample(x, vocab_size, sampling_method, temperature):
   return reshaped_samples
 
 
-def ae_latent_softmax(latents_pred, latents_discrete_hot, hparams):
+def ae_latent_softmax(latents_pred, latents_discrete_hot, vocab_size, hparams):
   """Latent prediction and loss.
 
   Args:
     latents_pred: Tensor of shape [..., depth].
     latents_discrete_hot: Tensor of shape [..., vocab_size].
+    vocab_size: an int representing the vocab size.
     hparams: tf.contrib.training.HParams.
 
   Returns:
     sample: Tensor of shape [...], a sample from a multinomial distribution.
     loss: Tensor of shape [...], the softmax cross-entropy.
   """
-  vocab_size = 2**hparams.bottleneck_bits
   with tf.variable_scope("latent_logits"):
     latents_logits = tf.layers.dense(latents_pred, vocab_size,
                                      name="logits_dense")
@@ -91,6 +89,9 @@ def ae_latent_softmax(latents_pred, latents_discrete_hot, hparams):
                                  tf.reduce_mean(tf.square(latents_logits)))
     loss = tf.nn.softmax_cross_entropy_with_logits_v2(
         labels=latents_discrete_hot, logits=latents_logits)
+
+    # TODO(trandustin): tease this out from ae_latent_softmax.
+    # we use just the loss portion to anchor prior / encoder on text.
     sample = multinomial_sample(latents_logits,
                                 vocab_size,
                                 hparams.sampling_method,
@@ -216,6 +217,10 @@ def compress_encoder(inputs,
             padding="SAME",
             name="compress_conv_%d" % i)
         y = tf.nn.dropout(y, 1.0 - hparams.dropout)
+        if hparams.do_compress_attend:
+          y = compress_self_attention_layer(
+              x, hparams, name="compress_selfatt_%d" % i)
+          y += x
         x = y
 
     x = residual_block_layer(x, hparams)
@@ -293,6 +298,10 @@ def decompress_decoder(inputs,
     for i in range(hparams.num_compress_steps // 2):
       j = hparams.num_compress_steps // 2 - i - 1
       with tf.variable_scope(name + "_%d" % j):
+        if hparams.do_decompress_attend:
+          y = compress_self_attention_layer(
+              x, hparams, name="decompress_selfatt")
+          x += y
         y = tf.layers.conv2d_transpose(
             x,
             hparams.hidden_size,
@@ -464,7 +473,7 @@ def bottleneck_layer(targets_c, hparams):
   latents_discrete = tf.argmax(latents_discrete_hot, axis=-1)
 
   if DO_SUMMARIES:
-    tf.summary.histogram("b0", tf.reshape(latents_discrete, [-1]))
+    tf.summary.histogram("discrete_latents", tf.reshape(latents_discrete, [-1]))
   return latents_dense, latents_discrete_hot, extra_loss
 
 
@@ -473,6 +482,7 @@ def latent_prediction_model(inputs,
                             latents_discrete,
                             latents_dense,
                             hparams,
+                            vocab_size=None,
                             name="latent_prediction"):
   """Transformer-based latent prediction model.
 
@@ -487,6 +497,7 @@ def latent_prediction_model(inputs,
       One-hot latents to compute log-probability of given inputs.
     latents_dense: Tensor of shape [batch, length_q, hparams.hidden_size].
     hparams: tf.contrib.training.HParams.
+    vocab_size: int, if given else None.
     name: string, variable scope.
 
   Returns:
@@ -495,11 +506,15 @@ def latent_prediction_model(inputs,
   """
   with tf.variable_scope(name):
     if hparams.mode != tf.estimator.ModeKeys.PREDICT:
-      latents_pred = transformer_latent_decoder(
-          tf.stop_gradient(latents_dense), inputs, ed_attention_bias,
-          hparams, name)
+      latents_pred = transformer_latent_decoder(tf.stop_gradient(latents_dense),
+                                                inputs,
+                                                ed_attention_bias,
+                                                hparams,
+                                                name)
+      vocab_size = (2**hparams.bottleneck_bits
+                    if vocab_size is None else vocab_size)
       _, latent_pred_loss = ae_latent_softmax(
-          latents_pred, tf.stop_gradient(latents_discrete), hparams)
+          latents_pred, tf.stop_gradient(latents_discrete), vocab_size, hparams)
   return latents_pred, latent_pred_loss
 
 
