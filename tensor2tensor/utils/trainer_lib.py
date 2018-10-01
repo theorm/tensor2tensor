@@ -391,18 +391,39 @@ class T2TExperiment(object):
     server = tf.train.Server(
         config.cluster_spec,
         job_name=config.task_type,
-        task_index=config.task_id)
+        task_index=config.task_id,
+        protocol=self._hparams.std_server_protocol)
     server.join()
 
-  def decode(self):
-    """Decodes from dataset."""
-    decoding.decode_from_dataset(self._estimator, self._hparams.problem.name,
-                                 self._hparams, self._decode_hparams)
+  def decode(self, dataset_split=None, decode_from_file=False):
+    """Decodes from dataset or file."""
+    if decode_from_file:
+      decoding.decode_from_file(self._estimator,
+                                self._decode_hparams.decode_from_file,
+                                self._hparams,
+                                self._decode_hparams,
+                                self._decode_hparams.decode_to_file)
+    else:
+      decoding.decode_from_dataset(self._estimator,
+                                   self._hparams.problem.name,
+                                   self._hparams,
+                                   self._decode_hparams,
+                                   dataset_split=dataset_split)
 
   def continuous_decode(self):
     """Decode from dataset on new checkpoint."""
     for _ in next_checkpoint(self._hparams.model_dir):
       self.decode()
+
+  def continuous_decode_on_train_data(self):
+    """Decode from dataset on new checkpoint."""
+    for _ in next_checkpoint(self._hparams.model_dir):
+      self.decode(dataset_split=tf.estimator.ModeKeys.TRAIN)
+
+  def continuous_decode_from_file(self):
+    """Decode from file on new checkpoint."""
+    for _ in next_checkpoint(self._hparams.model_dir):
+      self.decode(decode_from_file=True)
 
 
 def create_experiment(
@@ -424,13 +445,16 @@ def create_experiment(
     eval_early_stopping_metric=None,
     eval_early_stopping_metric_delta=None,
     eval_early_stopping_metric_minimize=True,
-    autotune=False,
     use_tpu=False,
     use_tpu_estimator=False,
     use_xla=False,
     additional_train_hooks=None,
     additional_eval_hooks=None,
-    warm_start_from=None):
+    warm_start_from=None,
+    decode_from_file=None,
+    decode_to_file=None,
+    decode_reference=None,
+    std_server_protocol=None):
   """Create Experiment."""
   # HParams
   hparams.add_hparam("model_dir", run_config.model_dir)
@@ -439,6 +463,11 @@ def create_experiment(
   hparams.add_hparam("eval_steps", eval_steps)
   hparams.add_hparam("schedule", schedule)
   hparams.add_hparam("warm_start_from", warm_start_from)
+  hparams.add_hparam("std_server_protocol", std_server_protocol)
+  if decode_hparams is not None:
+    decode_hparams.add_hparam("decode_from_file", decode_from_file)
+    decode_hparams.add_hparam("decode_to_file", decode_to_file)
+    decode_hparams.add_hparam("decode_reference", decode_reference)
   add_problem_hparams(hparams, problem_name)
 
   # Estimator
@@ -533,18 +562,6 @@ def create_experiment(
       throttle_secs=eval_throttle_seconds,
       exporters=exporter)
 
-  if autotune:
-    hooks_kwargs = {"train_monitors": train_hooks, "eval_hooks": eval_hooks}
-    return tf.contrib.learn.Experiment(
-        estimator=estimator,
-        train_input_fn=train_input_fn,
-        eval_input_fn=eval_input_fn,
-        train_steps=train_steps,
-        eval_steps=eval_steps,
-        min_eval_frequency=min_eval_frequency,
-        train_steps_per_iteration=min(min_eval_frequency, train_steps),
-        eval_delay_secs=0 if schedule == "evaluate" else 120,
-        **hooks_kwargs if not use_tpu else {})
   return T2TExperiment(estimator, hparams, train_spec, eval_spec,
                        use_validation_monitor, decode_hparams)
 
@@ -556,11 +573,6 @@ def create_experiment_fn(*args, **kwargs):
     return create_experiment(run_config, hparams, *args, **kwargs)
 
   return experiment_fn
-
-
-def create_export_strategy(problem, hparams):
-  return tf.contrib.learn.make_export_strategy(
-      lambda: problem.serving_input_fn(hparams), as_text=True)
 
 
 def add_problem_hparams(hparams, problem_name):

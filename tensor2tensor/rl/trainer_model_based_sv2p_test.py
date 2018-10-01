@@ -28,8 +28,7 @@ class ModelRLExperimentSv2pTest(tf.test.TestCase):
 
   def test_sv2p(self):
     FLAGS.output_dir = tf.test.get_temp_dir()
-    FLAGS.loop_hparams_set = "rl_modelrl_tiny_sv2p"
-    FLAGS.schedule = "train"
+    FLAGS.loop_hparams_set = "rlmb_tiny_sv2p"
     trainer_model_based.main(None)
 
 

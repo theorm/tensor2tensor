@@ -48,6 +48,7 @@ def dense(x, output_dim, reduced_dims=None, expert_dims=None,
   w_shape = mtf.Shape(expert_dims + reduced_dims + [output_dim])
   output_shape = mtf.Shape(
       [d for d in x.shape.dims if d not in reduced_dims] + [output_dim])
+
   with tf.variable_scope(name, default_name="dense"):
     stddev = mtf.list_product(d.size for d in reduced_dims) ** -0.5
     w = mtf.get_variable(
@@ -56,7 +57,7 @@ def dense(x, output_dim, reduced_dims=None, expert_dims=None,
         w_shape,
         initializer=tf.random_normal_initializer(stddev=stddev),
         activation_dtype=x.dtype)
-    y = mtf.matmul(x, w, output_shape=output_shape)
+    y = mtf.einsum([x, w], output_shape)
     if use_bias:
       b = mtf.get_variable(
           x.mesh,
@@ -574,6 +575,10 @@ def attention_bias_local_block(mesh, block_length, memory_length,
                                dtype=tf.int32):
   """Bias for attention for local blocks where attention to right is disallowed.
 
+  Create the bias matrix by using two separate masks, one for the memory part
+  which doesn't overlap with the query and second which interacts with the query
+  and should be disallowed to look to the right of the current query position.
+
   Args:
     mesh: a MeshTensorflow object
     block_length: a mtf.Dimension
@@ -581,10 +586,14 @@ def attention_bias_local_block(mesh, block_length, memory_length,
     dtype: a tf.dtype
 
   Returns:
-    a mtf.Tensor with shape [rows, cols]
+    a mtf.Tensor with shape [block_length, memory_length]
   """
+  memory_length = mtf.Dimension(memory_length.name, block_length.size)
+  memory_mask = mtf.zeros(mesh, [block_length, memory_length], dtype=dtype)
+
   mask = mtf.cast(mtf.less(mtf.range(mesh, block_length, dtype=dtype),
                            mtf.range(mesh, memory_length, dtype=dtype)),
                   dtype=dtype)
-  mask = mtf.cast(mask, dtype=tf.float32)  * -1e9
+  mask = mtf.cast(mtf.concat([memory_mask, mask], memory_length.name),
+                  dtype=tf.float32)  * -1e9
   return mask

@@ -25,17 +25,18 @@ import numpy as np
 
 from tensor2tensor.layers import common_layers
 from tensor2tensor.layers import common_video
-from tensor2tensor.models.research import next_frame_savp_params  # pylint: disable=unused-import
-from tensor2tensor.models.research import next_frame_sv2p
+from tensor2tensor.models.video import savp_params  # pylint: disable=unused-import
+from tensor2tensor.models.video import sv2p
 from tensor2tensor.utils import registry
 from tensor2tensor.utils import update_ops_hook
+
 import tensorflow as tf
 
 gan_losses = tf.contrib.gan.losses.wargs
 
 
 @registry.register_model
-class NextFrameSAVP(next_frame_sv2p.NextFrameSv2p):
+class NextFrameSAVP(sv2p.NextFrameSv2p):
   """Stochastic Adversarial Video Prediction."""
 
   def encoder(self, inputs, n_layers=3):
@@ -261,15 +262,15 @@ class NextFrameSAVP(next_frame_sv2p.NextFrameSv2p):
     return gan_loss
 
   def get_extra_loss(self, latent_means=None, latent_stds=None,
-                     true_frames=None, gen_frames=None, beta=1.0):
+                     true_frames=None, gen_frames=None):
     if not self.is_training:
       return 0.0
 
     vae_loss, d_vae_loss, d_gan_loss = 0.0, 0.0, 0.0
-    # Use next_frame_sv2p's KL divergence computation.
+    # Use sv2p's KL divergence computation.
     if self.hparams.use_vae:
       vae_loss = super(NextFrameSAVP, self).get_extra_loss(
-          latent_means=latent_means, latent_stds=latent_stds, beta=beta)
+          latent_means=latent_means, latent_stds=latent_stds)
 
     if self.hparams.use_gan:
       # Strip out the first context_frames for the true_frames

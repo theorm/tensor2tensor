@@ -173,10 +173,8 @@ class Transformer(t2t_model.T2TModel):
     targets = features["targets"]
     targets_shape = common_layers.shape_list(targets)
     targets = common_layers.flatten4d3d(targets)
-
     decoder_input, decoder_self_attention_bias = transformer_prepare_decoder(
         targets, hparams, features=features)
-
     decoder_output = self.decode(
         decoder_input,
         encoder_output,
@@ -221,7 +219,8 @@ class Transformer(t2t_model.T2TModel):
       NotImplementedError: If there are multiple data shards.
     """
     # For real-valued modalities use the slow decode path for now.
-    if self._target_modality_is_real:
+    if (self._target_modality_is_real or
+        self._hparams.self_attention_type != "dot_product"):
       return  super(Transformer, self)._greedy_infer(features, decode_length)
     with tf.variable_scope(self.name):
       return (self._fast_decode_tpu(features, decode_length) if use_tpu else
@@ -1223,8 +1222,11 @@ def transformer_encoder(encoder_input,
               hparams.num_heads,
               hparams.attention_dropout,
               attention_type=hparams.self_attention_type,
-              save_weights_to=save_weights_to,
               max_relative_position=hparams.max_relative_position,
+              heads_share_relative_embedding=(
+                  hparams.heads_share_relative_embedding),
+              add_relative_to_values=hparams.add_relative_to_values,
+              save_weights_to=save_weights_to,
               make_image_summary=make_image_summary,
               dropout_broadcast_dims=attention_dropout_broadcast_dims,
               max_length=hparams.get("max_length"),
@@ -1306,8 +1308,11 @@ def transformer_decoder(decoder_input,
               hparams.num_heads,
               hparams.attention_dropout,
               attention_type=hparams.self_attention_type,
-              save_weights_to=save_weights_to,
               max_relative_position=hparams.max_relative_position,
+              heads_share_relative_embedding=(
+                  hparams.heads_share_relative_embedding),
+              add_relative_to_values=hparams.add_relative_to_values,
+              save_weights_to=save_weights_to,
               cache=layer_cache,
               make_image_summary=make_image_summary,
               dropout_broadcast_dims=attention_dropout_broadcast_dims,
@@ -1326,6 +1331,10 @@ def transformer_decoder(decoder_input,
                 hparams.hidden_size,
                 hparams.num_heads,
                 hparams.attention_dropout,
+                max_relative_position=hparams.max_relative_position,
+                heads_share_relative_embedding=(
+                    hparams.heads_share_relative_embedding),
+                add_relative_to_values=hparams.add_relative_to_values,
                 save_weights_to=save_weights_to,
                 cache=layer_cache,
                 make_image_summary=make_image_summary,
@@ -1453,10 +1462,19 @@ def transformer_ffn_layer(x,
         hparams.moe_num_experts,
         overhead=overhead,
         loss_coef=hparams.moe_loss_coef)
-    if losses is None:
-      raise ValueError(
-          "transformer_ffn_layer with type local_moe_tpu must pass in "
-          "a losses list")
+  elif ffn_layer == "local_moe":
+    overhead = (
+        hparams.moe_overhead_train
+        if hparams.mode == tf.estimator.ModeKeys.TRAIN else
+        hparams.moe_overhead_eval)
+    ret, loss = expert_utils.local_moe(
+        x,
+        True,
+        expert_utils.ffn_expert_fn(hparams.hidden_size, [hparams.filter_size],
+                                   hparams.hidden_size),
+        hparams.moe_num_experts,
+        k=hparams.moe_k,
+        hparams=hparams)
     losses.append(loss)
     return ret
   else:
@@ -1513,7 +1531,6 @@ def transformer_base_v1():
   hparams.add_hparam("causal_decoder_self_attention", True)
   hparams.add_hparam("use_pad_remover", True)
   hparams.add_hparam("self_attention_type", "dot_product")
-  hparams.add_hparam("max_relative_position", 0)
   hparams.add_hparam("conv_first_kernel", 3)
   hparams.add_hparam("attention_variables_3d", False)
   hparams.add_hparam("use_target_space_embedding", True)
@@ -1540,7 +1557,110 @@ def transformer_base_v2():
 
 
 @registry.register_hparams
-def transformer_base():
+def transformer_base_vq_ada_32ex_packed():
+  """Set of hyperparameters for lm1b packed following tpu params."""
+  hparams = transformer_base_v2()
+  expert_utils.update_hparams_for_vq_gating(hparams)
+  hparams.moe_num_experts = 32
+  hparams.gating_type = "vq"
+  # this gives us a batch size of 16 because each seq is len 256
+  hparams.batch_size = 5072
+  hparams.ffn_layer = "local_moe"
+  hparams.shared_embedding_and_softmax_weights = False
+  hparams.learning_rate_warmup_steps = 10000
+  # one epoch for languagemodel_lm1b32k_packed = 27200 steps w/ bsize 128
+  hparams.learning_rate_decay_steps = 27200
+  hparams.num_heads = 4
+  hparams.num_blocks = 1
+  hparams.moe_k = 1
+  hparams.num_decoder_layers = 6
+  hparams.label_smoothing = 0.
+  hparams.layer_prepostprocess_dropout = 0.1
+  hparams.layer_postprocess_sequence = "dan"
+  hparams.layer_preprocess_sequence = "none"
+  hparams.weight_decay = 1e-06
+  hparams.attention_dropout = 0.1
+  hparams.optimizer = "Adafactor"
+  hparams.learning_rate_schedule = "linear_warmup*rsqrt_decay*linear_decay"
+  hparams.activation_dtype = "float32"
+  hparams.learning_rate = 0.1
+  hparams.learning_rate_constant = 1.0
+  return hparams
+
+
+@registry.register_hparams
+def transformer_topk_16_packed():
+  hparams = transformer_base_vq_ada_32ex_packed()
+  hparams.gating_type = "topk"
+  hparams.moe_num_experts = 16
+  hparams.moe_k = 2
+  return hparams
+
+
+@registry.register_hparams
+def transformer_base_vq1_16_nb1_packed_nda_b01_scales():
+  """Set of hyperparameters."""
+  hparams = transformer_base_vq_ada_32ex_packed()
+  hparams.use_scales = int(True)
+  hparams.moe_num_experts = 16
+  hparams.moe_k = 1
+  hparams.beta = 0.1
+  hparams.layer_preprocess_sequence = "n"
+  hparams.layer_postprocess_sequence = "da"
+  hparams.ema = False
+  return hparams
+
+
+@registry.register_hparams
+def transformer_base_vq1_16_nb1_packed_dan_b01_scales():
+  """Set of hyperparameters."""
+  hparams = transformer_base_vq_ada_32ex_packed()
+  hparams.use_scales = int(True)
+  hparams.moe_num_experts = 16
+  hparams.moe_k = 1
+  hparams.beta = 0.1
+  hparams.ema = False
+  return hparams
+
+
+@registry.register_hparams
+def transformer_base_vq1_16_nb1_packed_nda_b01_scales_dialog():
+  """Set of hyperparameters."""
+  hparams = transformer_base_vq1_16_nb1_packed_nda_b01_scales()
+  hparams.batch_size = 2048
+  hparams.max_length = 1024
+  hparams.filter_size = 3072
+  return hparams
+
+
+@registry.register_hparams
+def transformer_ada_lmpackedbase():
+  """Set of hyperparameters."""
+  hparams = transformer_base_vq_ada_32ex_packed()
+  hparams.ffn_layer = "dense_relu_dense"
+  return hparams
+
+
+@registry.register_hparams
+def transformer_ada_lmpackedbase_dialog():
+  """Set of hyperparameters."""
+  hparams = transformer_base_vq_ada_32ex_packed()
+  hparams.max_length = 1024
+  hparams.ffn_layer = "dense_relu_dense"
+  hparams.batch_size = 4096
+  return hparams
+
+
+@registry.register_hparams
+def transformer_ada_lmpackedbase_relative():
+  """Set of hyperparameters."""
+  hparams = transformer_base_vq_ada_32ex_packed()
+  hparams.ffn_layer = "dense_relu_dense"
+  return hparams
+
+
+@registry.register_hparams
+def transformer_base_v3():
   """Base parameters for Transformer model."""
   # Update parameters here, then occasionally cut a versioned set, e.g.
   # transformer_base_v2.
@@ -1555,6 +1675,13 @@ def transformer_base():
 
 
 @registry.register_hparams
+def transformer_base():
+  """Base parameters for Transformer model."""
+  hparams = transformer_base_v3()
+  return hparams
+
+
+@registry.register_hparams
 def transformer_big():
   """HParams for transformer big model on WMT."""
   hparams = transformer_base()
@@ -1562,6 +1689,32 @@ def transformer_big():
   hparams.filter_size = 4096
   hparams.num_heads = 16
   hparams.layer_prepostprocess_dropout = 0.3
+  return hparams
+
+
+@registry.register_hparams
+def transformer_tall():
+  """Hparams for transformer on LM+MNLI."""
+  hparams = transformer_base()
+  hparams.batch_size = 2048
+  hparams.hidden_size = 768
+  hparams.filter_size = 3072
+  hparams.num_hidden_layers = 12
+  hparams.num_heads = 12
+  hparams.learning_rate_schedule = (
+      "constant*linear_warmup*rsqrt_hidden_size")
+  hparams.learning_rate_constant = 2e-3
+  hparams.label_smoothing = 0.0
+  hparams.max_length = 512
+  hparams.eval_drop_long_sequences = True
+  return hparams
+
+
+@registry.register_hparams
+def transformer_tall_big():
+  """Hparams for transformer on LM+MNLI."""
+  hparams = transformer_tall()
+  hparams.num_hidden_layers = 18
   return hparams
 
 
@@ -1906,6 +2059,22 @@ def transformer_timeseries():
   hparams = transformer_small()
   hparams.batch_size = 256
   hparams.learning_rate_warmup_steps = 2000
+  return hparams
+
+
+@registry.register_hparams
+def transformer_mlperf_tpu():
+  """HParams for Transformer model on TPU for MLPerf on TPU 2x2."""
+  hparams = transformer_base_v3()
+  hparams.symbol_modality_num_shards = 1
+  hparams.max_length = 256  # ignored when using "_packed" problems
+  hparams.batch_size = 2048  # per-chip batch size matches the reference model
+  hparams.hidden_size = 1024
+  hparams.filter_size = 4096
+  hparams.num_heads = 16
+  hparams.attention_dropout_broadcast_dims = "0,1"  # batch, heads
+  hparams.relu_dropout_broadcast_dims = "1"  # length
+  hparams.layer_prepostprocess_dropout_broadcast_dims = "1"  # length
   return hparams
 
 

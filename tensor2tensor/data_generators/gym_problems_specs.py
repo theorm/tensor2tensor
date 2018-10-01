@@ -18,15 +18,15 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import gym
-
 # We need gym_utils for the game environments defined there.
 from tensor2tensor.data_generators import gym_utils  # pylint: disable=unused-import
 # pylint: disable=g-multiple-import
 from tensor2tensor.data_generators.gym_problems import GymDiscreteProblem,\
   GymSimulatedDiscreteProblem, GymRealDiscreteProblem, \
   GymDiscreteProblemWithAutoencoder, GymDiscreteProblemAutoencoded, \
-  GymSimulatedDiscreteProblemAutoencoded
+  GymSimulatedDiscreteProblemAutoencoded, \
+  GymSimulatedDiscreteProblemForWorldModelEval, \
+  GymSimulatedDiscreteProblemForWorldModelEvalAutoencoded
 # pylint: enable=g-multiple-import
 from tensor2tensor.utils import registry
 
@@ -50,30 +50,51 @@ ATARI_GAMES = [
     "zaxxon"
 ]
 
-# Subset of games with promissing results on model based training.
+# List from paper:
+# https://arxiv.org/pdf/1805.11593.pdf
+# plus frostbite.
+ATARI_GAMES_WITH_HUMAN_SCORE = [
+    "alien", "amidar", "assault", "asterix", "asteroids",
+    "atlantis", "bank_heist", "battle_zone", "beam_rider", "bowling",
+    "boxing", "breakout", "chopper_command",
+    "crazy_climber", "demon_attack", "double_dunk", "enduro",
+    "fishing_derby", "freeway", "frostbite", "gopher", "gravitar", "hero",
+    "ice_hockey", "jamesbond", "kangaroo", "krull",
+    "kung_fu_master", "montezuma_revenge", "ms_pacman", "name_this_game",
+    "pitfall", "pong", "private_eye", "qbert", "riverraid",
+    "road_runner", "seaquest", "solaris",
+    "up_n_down", "video_pinball", "yars_revenge",
+]
+
+ATARI_ALL_MODES_SHORT_LIST = []
+
 ATARI_WHITELIST_GAMES = [
     "amidar",
     "bank_heist",
     "berzerk",
     "boxing",
-    "breakout",
     "crazy_climber",
     "freeway",
     "frostbite",
     "gopher",
-    "hero",
     "kung_fu_master",
+    "ms_pacman",
     "pong",
-    "road_runner",
+    "qbert",
     "seaquest",
-    # TODO(blazej): check if we get equally good results on vanilla pong.
-    "wrapped_full_pong",
 ]
 
-ATARI_ALL_MODES_SHORT_LIST = [
-    "pong",
+
+# Games on which model-free does better than model-based at this point.
+ATARI_CURIOUS_GAMES = [
+    "bank_heist",
     "boxing",
+    "enduro",
+    "kangaroo",
+    "road_runner",
+    "up_n_down",
 ]
+
 
 # Different ATARI game modes in OpenAI Gym. Full list here:
 # https://github.com/openai/gym/blob/master/gym/envs/__init__.py
@@ -144,9 +165,38 @@ class GymSimulatedDiscreteProblemWithAgentOnWrappedFullPong(
 
 
 @registry.register_problem
+class GymSimulatedDiscreteProblemForWorldModelEvalWithAgentOnWrappedFullPong(
+    GymSimulatedDiscreteProblemForWorldModelEval, GymWrappedFullPongRandom):
+  """Simulated pong for world model evaluation."""
+
+  @property
+  def initial_frames_problem(self):
+    return "gym_discrete_problem_with_agent_on_wrapped_full_pong"
+
+  @property
+  def num_testing_steps(self):
+    return 100
+
+
+@registry.register_problem
 class GymSimulatedDiscreteProblemWithAgentOnWrappedFullPongAutoencoded(
     GymSimulatedDiscreteProblemAutoencoded, GymWrappedFullPongRandom):
   """GymSimulatedDiscreteProblemWithAgentOnWrappedFullPongAutoencoded."""
+
+  @property
+  def initial_frames_problem(self):
+    return "gym_discrete_problem_with_agent_on_wrapped_full_pong_autoencoded"
+
+  @property
+  def num_testing_steps(self):
+    return 100
+
+
+@registry.register_problem
+class GymSimulatedDiscreteProblemForWorldModelEvalWithAgentOnWrappedFullPongAutoencoded(  # pylint: disable=line-too-long
+    GymSimulatedDiscreteProblemForWorldModelEvalAutoencoded,
+    GymWrappedFullPongRandom):
+  """Simulated pong for world model evaluation with encoded frames."""
 
   @property
   def initial_frames_problem(self):
@@ -175,14 +225,15 @@ class GymClippedRewardRandom(GymDiscreteProblem):
 
 def create_problems_for_game(
     game_name,
-    clipped_reward=True,
+    resize_height_factor=1,
+    resize_width_factor=1,
     game_mode="Deterministic-v4"):
   """Create and register problems for game_name.
 
   Args:
     game_name: str, one of the games in ATARI_GAMES, e.g. "bank_heist".
-    clipped_reward: bool, whether the rewards should be clipped. False is not
-      yet supported.
+    resize_height_factor: factor by which to resize the height of frames.
+    resize_width_factor: factor by which to resize the width of frames.
     game_mode: the frame skip and sticky keys config.
 
   Returns:
@@ -191,9 +242,6 @@ def create_problems_for_game(
   Raises:
     ValueError: if clipped_reward=False or game_name not in ATARI_GAMES.
   """
-  if not clipped_reward:
-    raise ValueError("Creating problems without clipped reward is not "
-                     "yet supported.")
   if game_name not in ATARI_GAMES:
     raise ValueError("Game %s not in ATARI_GAMES" % game_name)
   if game_mode not in ATARI_GAME_MODES:
@@ -202,18 +250,13 @@ def create_problems_for_game(
       [w[0].upper() + w[1:] for w in game_name.split("_")])
   camel_game_name += game_mode
   env_name = camel_game_name
-  wrapped_env_name = "T2T%s" % env_name
-
-  # Register an environment that does the reward clipping
-  gym.envs.register(
-      id=wrapped_env_name,
-      entry_point=lambda: gym_utils.wrapped_factory(  # pylint: disable=g-long-lambda
-          env=env_name, reward_clipping=True))
 
   # Create and register the Random and WithAgent Problem classes
   problem_cls = type("Gym%sRandom" % camel_game_name,
                      (GymClippedRewardRandom,),
-                     {"env_name": wrapped_env_name})
+                     {"env_name": env_name,
+                      "resize_height_factor": resize_height_factor,
+                      "resize_width_factor": resize_width_factor})
   registry.register_problem(problem_cls)
 
   with_agent_cls = type("GymDiscreteProblemWithAgentOn%s" % camel_game_name,
@@ -230,20 +273,19 @@ def create_problems_for_game(
       })
   registry.register_problem(simulated_cls)
 
+  # Create and register the simulated Problem
+  world_model_eval_cls = type(
+      "GymSimulatedDiscreteProblemForWorldModelEvalWithAgentOn%s" %
+      camel_game_name,
+      (GymSimulatedDiscreteProblemForWorldModelEval, problem_cls), {
+          "initial_frames_problem": with_agent_cls.name,
+          "num_testing_steps": 100
+      })
+  registry.register_problem(world_model_eval_cls)
+
   return {
       "base": problem_cls,
       "agent": with_agent_cls,
       "simulated": simulated_cls,
+      "world_model_eval": world_model_eval_cls,
   }
-
-# Register the atari games with all of the possible modes.
-for game in ATARI_ALL_MODES_SHORT_LIST:
-  ATARI_PROBLEMS[game] = {}
-  for mode in ATARI_GAME_MODES:
-    classes = create_problems_for_game(
-        game,
-        clipped_reward=True,
-        game_mode=mode)
-    ATARI_PROBLEMS[game][mode] = classes
-
-

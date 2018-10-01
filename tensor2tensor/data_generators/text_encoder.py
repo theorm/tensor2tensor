@@ -251,7 +251,7 @@ class OneHotClassLabelEncoder(ClassLabelEncoder):
   """One-hot encoder for class labels."""
 
   def encode(self, label_str, on_value=1, off_value=0):  # pylint: disable=arguments-differ
-    e = np.fill(self.vocab_size, off_value, dtype=np.int32)
+    e = np.full(self.vocab_size, off_value, dtype=np.int32)
     e[self._class_labels.index(label_str)] = on_value
     return e.tolist()
 
@@ -814,7 +814,7 @@ class SubwordTextEncoder(TextEncoder):
           start += len(subtoken)
         iter_time_secs = time.time() - iter_start_time
         if iter_time_secs > 0.1:
-          tf.logging.info("Processing token [{0}] took {1} seconds, consider "
+          tf.logging.info(u"Processing token [{0}] took {1} seconds, consider "
                           "setting Text2TextProblem.max_subtoken_length to a "
                           "smaller value.".format(token, iter_time_secs))
 

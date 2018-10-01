@@ -63,7 +63,11 @@ def decode_hparams(overrides=""):
       shards=1,
       shard_id=0,
       num_decodes=1,
-      force_decode_length=False)
+      force_decode_length=False,
+      display_decoded_images=False,
+      # Used for video decoding.
+      frames_per_second=10,
+      skip_eos_postprocess=False)
   hp.parse(overrides)
   return hp
 
@@ -200,7 +204,7 @@ def decode_from_dataset(estimator,
       hparams=hparams,
       decode_hparams=decode_hp,
       predictions=predictions
-  ))
+  ), dataset_split)
   return predictions
 
 
@@ -426,6 +430,20 @@ def decode_from_file(estimator,
   outfile = tf.gfile.Open(decode_filename, "w")
   for index in range(len(sorted_inputs)):
     outfile.write("%s%s" % (decodes[sorted_keys[index]], decode_hp.delimiter))
+  outfile.flush()
+  outfile.close()
+
+  output_dir = os.path.join(estimator.model_dir, "decode")
+  tf.gfile.MakeDirs(output_dir)
+
+  run_postdecode_hooks(DecodeHookArgs(
+      estimator=estimator,
+      problem=hparams.problem,
+      output_dirs=[output_dir],
+      hparams=hparams,
+      decode_hparams=decode_hp,
+      predictions=list(result_iter)
+  ), None)
 
 
 def _decode_filename(base_filename, problem_name, decode_hp):
@@ -468,7 +486,8 @@ def decode_interactively(estimator, hparams, decode_hp, checkpoint_path=None):
   is_image = "image" in hparams.problem.name
   is_text2class = isinstance(hparams.problem,
                              text_problems.Text2ClassProblem)
-  skip_eos_postprocess = is_image or is_text2class
+  skip_eos_postprocess = (
+      is_image or is_text2class or decode_hp.skip_eos_postprocess)
 
   def input_fn():
     gen_fn = make_input_fn_from_generator(
@@ -784,7 +803,7 @@ class DecodeHookArgs(collections.namedtuple(
   pass
 
 
-def run_postdecode_hooks(decode_hook_args):
+def run_postdecode_hooks(decode_hook_args, dataset_split):
   """Run hooks after decodes have run."""
   hooks = decode_hook_args.problem.decode_hooks
   if not hooks:
@@ -796,7 +815,10 @@ def run_postdecode_hooks(decode_hook_args):
     return
   tf.logging.info("Running decode hooks.")
   parent_dir = os.path.join(decode_hook_args.output_dirs[0], os.pardir)
-  final_dir = os.path.join(parent_dir, "decode")
+  child_dir = "decode"
+  if dataset_split is not None:
+    child_dir += "_{}".format(dataset_split)
+  final_dir = os.path.join(parent_dir, child_dir)
   summary_writer = tf.summary.FileWriter(final_dir)
 
   for hook in hooks:
