@@ -120,7 +120,7 @@ def generate_real_env_data(problem_name, agent_policy_path, hparams, data_dir,
           hparams.num_real_env_frames / (hparams.epochs * (1. - 1./11.)))
     gym_problem.settable_num_steps = env_steps_per_epoch
     gym_problem.settable_eval_phase = eval_phase
-    if real_reward:
+    if real_reward and autoencoder_path is None:
       gym_problem._forced_collect_level = 1  # pylint: disable=protected-access
     gym_problem.generate_data(data_dir, tmp_dir)
     mean_reward = None
@@ -892,6 +892,15 @@ def rlmb_base_stochastic_discrete():
 
 
 @registry.register_hparams
+def rlmb_base_stochastic_recurrent():
+  """Base setting with recurrent model."""
+  hparams = rlmb_base()
+  hparams.generative_model = "next_frame_basic_recurrent"
+  hparams.generative_model_params = "next_frame_basic_recurrent"
+  return hparams
+
+
+@registry.register_hparams
 def rlmb_base_stochastic_discrete_noresize():
   """Base setting with stochastic discrete model."""
   hparams = rlmb_base()
@@ -1078,6 +1087,16 @@ def rlmb_tiny_stochastic():
   hparams.epochs = 1  # Too slow with 2 for regular runs.
   hparams.generative_model = "next_frame_basic_stochastic"
   hparams.generative_model_params = "next_frame_basic_stochastic"
+  return hparams
+
+
+@registry.register_hparams
+def rlmb_tiny_recurrent():
+  """Tiny setting with a recurrent next-frame model."""
+  hparams = rlmb_tiny()
+  hparams.epochs = 1  # Too slow with 2 for regular runs.
+  hparams.generative_model = "next_frame_basic_recurrent"
+  hparams.generative_model_params = "next_frame_basic_recurrent"
   return hparams
 
 
