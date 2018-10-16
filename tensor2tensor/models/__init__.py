@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """Models defined in T2T. Imports here force registration."""
 from __future__ import absolute_import
 from __future__ import division
@@ -19,16 +20,15 @@ from __future__ import print_function
 # pylint: disable=unused-import
 
 from tensor2tensor.layers import modalities  # pylint: disable=g-import-not-at-top
-from tensor2tensor.mesh_tensorflow import mtf_image_transformer
-from tensor2tensor.mesh_tensorflow import mtf_resnet
-from tensor2tensor.mesh_tensorflow import mtf_transformer
-from tensor2tensor.mesh_tensorflow.research import experiments_moe
 from tensor2tensor.models import basic
 from tensor2tensor.models import bytenet
 from tensor2tensor.models import distillation
 from tensor2tensor.models import image_transformer
 from tensor2tensor.models import image_transformer_2d
 from tensor2tensor.models import lstm
+from tensor2tensor.models import mtf_image_transformer
+from tensor2tensor.models import mtf_resnet
+from tensor2tensor.models import mtf_transformer
 from tensor2tensor.models import neural_gpu
 from tensor2tensor.models import resnet
 from tensor2tensor.models import revnet
@@ -47,6 +47,7 @@ from tensor2tensor.models.research import cycle_gan
 from tensor2tensor.models.research import gene_expression
 from tensor2tensor.models.research import glow
 from tensor2tensor.models.research import lm_experiments
+from tensor2tensor.models.research import moe_experiments
 from tensor2tensor.models.research import rl
 from tensor2tensor.models.research import similarity_transformer
 from tensor2tensor.models.research import super_lm

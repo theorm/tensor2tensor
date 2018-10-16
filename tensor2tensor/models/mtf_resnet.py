@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """ResNet model with model and data parallelism using MTF.
 
 Integration of Mesh tensorflow with ResNet to do model parallelism.
@@ -22,11 +23,10 @@ from __future__ import division
 from __future__ import print_function
 
 import copy
+import mesh_tensorflow as mtf
 
 from tensor2tensor.layers import common_hparams
-from tensor2tensor.mesh_tensorflow import mesh_tensorflow as mtf
-from tensor2tensor.mesh_tensorflow import mtf_layers
-from tensor2tensor.mesh_tensorflow import mtf_model
+from tensor2tensor.utils import mtf_model
 from tensor2tensor.utils import registry
 import tensorflow as tf
 
@@ -37,7 +37,7 @@ BATCH_NORM_EPSILON = 1e-5
 
 def batch_norm_relu(inputs, is_training, relu=True):
   """Block of batch norm and relu."""
-  inputs = mtf_layers.batch_norm(
+  inputs = mtf.layers.batch_norm(
       inputs,
       is_training,
       BATCH_NORM_DECAY,
@@ -304,7 +304,7 @@ class MtfResNet(mtf_model.MtfModel):
 
     # Calculate the logits and loss.
     out = x
-    outputs = mtf_layers.dense(
+    outputs = mtf.layers.dense(
         out, hidden_dim,
         reduced_dims=out.shape.dims[-5:],
         activation=mtf.relu, name="dense")
@@ -314,9 +314,9 @@ class MtfResNet(mtf_model.MtfModel):
     labels = mtf.import_tf_tensor(
         mesh, tf.reshape(labels, [hparams.batch_size]), mtf.Shape([batch_dim]))
 
-    logits = mtf_layers.dense(outputs, classes_dim, name="logits")
+    logits = mtf.layers.dense(outputs, classes_dim, name="logits")
     soft_targets = mtf.one_hot(labels, classes_dim, dtype=activation_dtype)
-    loss = mtf_layers.softmax_cross_entropy_with_logits(
+    loss = mtf.layers.softmax_cross_entropy_with_logits(
         logits, soft_targets, classes_dim)
 
     # Reshape logits so it doesn't break inside t2t.

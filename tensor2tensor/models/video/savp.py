@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """Stochastic Adversarial Video Prediction model.
 
 Reference: https://arxiv.org/abs/1804.01523
@@ -36,7 +37,7 @@ gan_losses = tf.contrib.gan.losses.wargs
 
 
 @registry.register_model
-class NextFrameSAVP(sv2p.NextFrameSv2p):
+class NextFrameSAVP(sv2p.NextFrameSv2pLegacy):
   """Stochastic Adversarial Video Prediction."""
 
   def encoder(self, inputs, n_layers=3):

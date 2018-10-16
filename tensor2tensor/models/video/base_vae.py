@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """Basic models for testing simple tasks."""
 
 from __future__ import absolute_import
@@ -29,13 +30,6 @@ class NextFrameBaseVae(object):
 
   def __init__(self, hparams):
     self.hparams = hparams
-
-  def get_iteration_num(self):
-    step_num = tf.train.get_global_step()
-    # TODO(lukaszkaiser): what should it be if it's undefined?
-    if step_num is None:
-      step_num = 1000000
-    return step_num
 
   def get_beta(self, kl_loss=0.0):
     """Get the KL multiplier, either dynamically or schedule based.

@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """T2TModel Base Class."""
 from __future__ import absolute_import
 from __future__ import division
@@ -223,8 +224,15 @@ class T2TModel(base.Layer):
       else:
         return tf.concat(sharded_logits, 0), losses
 
-  @property
-  def use_body_sharded(self):
+  @staticmethod
+  def has_symmetric_shards(model_name):
+    # model_fn is sharded symmetrically unless the model overrides body_sharded
+    # method to manually control the sharding.
+    model_cls = registry.model(model_name)
+    return not model_cls.use_body_sharded()
+
+  @staticmethod
+  def use_body_sharded():
     return False
 
   def body_sharded(self, sharded_features):
@@ -235,7 +243,7 @@ class T2TModel(base.Layer):
   def model_fn_sharded(self, sharded_features):
     dp = self._data_parallelism
     datashard_to_features = self._to_features_per_datashard(sharded_features)
-    if self.use_body_sharded:
+    if self.use_body_sharded():
       # MoE models override body_sharded
       transformed_features = dp(self.bottom, datashard_to_features)
       body_out = self.body_sharded(
@@ -657,11 +665,17 @@ class T2TModel(base.Layer):
       else:
         log_info("Beam Decoding with beam size %d" % beam_size)
         results = self._beam_decode(features, decode_length, beam_size,
-                                    top_beams, alpha)
+                                    top_beams, alpha, use_tpu)
 
       return results
 
-  def _beam_decode(self, features, decode_length, beam_size, top_beams, alpha):
+  def _beam_decode(self,
+                   features,
+                   decode_length,
+                   beam_size,
+                   top_beams,
+                   alpha,
+                   use_tpu=False):
     """Beam search decoding.
 
     Models should ideally implement a more efficient version of this function.
@@ -673,15 +687,16 @@ class T2TModel(base.Layer):
       top_beams: an integer. How many of the beams to return.
       alpha: Float that controls the length penalty. larger the alpha, stronger
         the preference for longer translations.
+      use_tpu: A bool, whether to do beam decode on TPU.
 
     Returns:
        samples: an integer `Tensor`. Top samples from the beam search
     """
     return self._beam_decode_slow(features, decode_length, beam_size, top_beams,
-                                  alpha)
+                                  alpha, use_tpu)
 
   def _beam_decode_slow(self, features, decode_length, beam_size, top_beams,
-                        alpha):
+                        alpha, use_tpu=False):
     """Slow version of Beam search decoding.
 
     Quadratic time in decode_length.
@@ -693,10 +708,18 @@ class T2TModel(base.Layer):
       top_beams: an integer. How many of the beams to return.
       alpha: Float that controls the length penalty. larger the alpha, stronger
         the preference for longer translations.
+      use_tpu: A bool, whether to do slow beam decode on TPU.
 
     Returns:
-       samples: an integer `Tensor`. Top samples from the beam search
+      samples: an integer `Tensor`. Top samples from the beam search.
+
+    Raises:
+      NotImplementedError: If use_tpu is set to true.
     """
+    if use_tpu:
+      raise NotImplementedError(
+          "Slow beam search inference on TPU is not supported")
+
     batch_size = common_layers.shape_list(features["inputs"])[0]
 
     def symbols_to_logits_fn(ids):

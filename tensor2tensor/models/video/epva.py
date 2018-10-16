@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """Model architecture for video prediction model.
 
 based on following paper:
@@ -625,7 +626,7 @@ def calc_loss_psnr(gen_images, images, name, hparams=None, use_l1_loss=False):
 
 
 @registry.register_model
-class NextFrameEpva(sv2p.NextFrameSv2p):
+class NextFrameEpva(sv2p.NextFrameSv2pLegacy):
   """Hierarchical Long-term Video Prediction without Supervision"""
 
   def body(self, features):

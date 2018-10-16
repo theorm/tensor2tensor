@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """Model architecture for video prediction model.
 
    based on following paper:
@@ -40,7 +41,7 @@ tfcl = tf.contrib.layers
 
 
 @registry.register_model
-class NextFrameEmily(sv2p.NextFrameSv2p):
+class NextFrameEmily(sv2p.NextFrameSv2pLegacy):
   """Stochastic Variational Video Prediction Without Learned Prior."""
 
   def encoder(self, inputs, nout):

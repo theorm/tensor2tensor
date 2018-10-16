@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """image generation with transformer (attention).
 
 encoder: [Self-Attention, Feed-forward] x n
@@ -130,8 +131,8 @@ class Imagetransformer(t2t_model.T2TModel):
 class ImagetransformerMoe(t2t_model.T2TModel):
   """Conditional image generation with attention and MoE."""
 
-  @property
-  def use_body_sharded(self):
+  @staticmethod
+  def use_body_sharded():
     return True
 
   def body_sharded(self, sharded_features):

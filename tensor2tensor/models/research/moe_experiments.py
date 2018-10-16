@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """Experiments with mixture-of-experts architectures."""
 
 
@@ -19,8 +20,8 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from tensor2tensor.mesh_tensorflow import mtf_transformer
-from tensor2tensor.mesh_tensorflow.research import moe
+from tensor2tensor.models import mtf_transformer
+from tensor2tensor.models.research import moe
 from tensor2tensor.utils import registry
 
 
@@ -140,6 +141,14 @@ def xmoe_2d():
 
 
 @registry.register_hparams
+def xmoe_2d_c15():
+  """Mixture of experts."""
+  hparams = xmoe_2d()
+  hparams.moe_capacity_factor_train = 1.5
+  return hparams
+
+
+@registry.register_hparams
 def xmoe_2d_88():
   """Two-dimensional hierarchical mixture of experts."""
   hparams = xmoe_2d()
@@ -221,6 +230,42 @@ def xmoe_wiki_x64():
 
 
 @registry.register_hparams
+def xmoe_wiki_x32():
+  """Two-dimensional hierarchical mixture of experts.
+
+  (8x4 experts) * (16M params/expert) * 6 layers = 3B params
+
+  Returns:
+    a hparams object.
+  """
+  hparams = xmoe_wiki_base()
+  moe.set_default_moe_hparams(hparams)
+  hparams.feedforward_layer = "hmoe"
+  hparams.moe_hidden_size = 8192
+  hparams.mesh_shape = "b0:4;b1:8"
+  hparams.layout = "outer_batch:b0;inner_batch:b1,expert_x:b1,expert_y:b0"
+  hparams.outer_batch_size = 4
+  hparams.moe_num_experts = [8, 4]
+  return hparams
+
+
+@registry.register_hparams
+def xmoe_wiki_x64_h16k():
+  """Mixture of experts."""
+  hparams = xmoe_wiki_x64()
+  hparams.moe_hidden_size = 16384
+  return hparams
+
+
+@registry.register_hparams
+def xmoe_wiki_x64_c15():
+  """Mixture of experts."""
+  hparams = xmoe_wiki_x64()
+  hparams.moe_capacity_factor_train = 1.5
+  return hparams
+
+
+@registry.register_hparams
 def xmoe_wiki_x256():
   """Two-dimensional hierarchical mixture of experts.
 
@@ -235,6 +280,60 @@ def xmoe_wiki_x256():
   hparams.moe_num_experts = [16, 16]
   hparams.batch_size = 256
   hparams.learning_rate_decay_steps = 28750
+  return hparams
+
+
+@registry.register_hparams
+def xmoe_wiki_x256_h16k():
+  """Two-dimensional hierarchical mixture of experts.
+
+  (16x16 experts) * (32M params/expert) * 6 layers = ~50B params
+
+  Returns:
+    a hparams object.
+  """
+  hparams = xmoe_wiki_x256()
+  hparams.moe_hidden_size = 16384
+  return hparams
+
+
+@registry.register_hparams
+def xmoe_wiki_x1024():
+  """Two-dimensional hierarchical mixture of experts.
+
+  (16x16 experts) * (16M params/expert) * 6 layers = ~100B params
+
+  Returns:
+    a hparams object.
+  """
+  hparams = xmoe_wiki_x64()
+  hparams.mesh_shape = "b0:16;b1:32"
+  hparams.outer_batch_size = 16
+  hparams.moe_num_experts = [32, 32]
+  hparams.batch_size = 4096
+  hparams.learning_rate_decay_steps = 7200
+  return hparams
+
+
+@registry.register_hparams
+def xmoe_wiki_x1024_h16k():
+  """Two-dimensional hierarchical mixture of experts.
+
+  (32x32 experts) * (32M params/expert) * 6 layers = ~200B params
+
+  Returns:
+    a hparams object.
+  """
+  hparams = xmoe_wiki_x1024()
+  hparams.moe_hidden_size = 16384
+  return hparams
+
+
+@registry.register_hparams
+def xmoe_wiki_x256_c15():
+  """Mixture of experts."""
+  hparams = xmoe_wiki_x256()
+  hparams.moe_capacity_factor_train = 1.5
   return hparams
 
 

@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """Basic tests for SV2P model."""
 
 from __future__ import absolute_import
@@ -31,13 +32,15 @@ class NextFrameTest(tests_utils.BaseNextFrameTest):
     self.TestOnVariousInputOutputSizes(
         sv2p_params.next_frame_sv2p(),
         sv2p.NextFrameSv2p,
-        1)
+        1,
+        False)
 
   def testSv2pWithActions(self):
     self.TestWithActions(
         sv2p_params.next_frame_sv2p(),
         sv2p.NextFrameSv2p,
-        1)
+        1,
+        False)
 
   def testSv2pWithActionsAndRewards(self):
     hp = sv2p_params.next_frame_sv2p()
@@ -45,7 +48,8 @@ class NextFrameTest(tests_utils.BaseNextFrameTest):
     self.TestWithActionAndRewards(
         hp,
         sv2p.NextFrameSv2p,
-        1)
+        1,
+        False)
 
   def testSv2pWithActionsAndRewardsExternalLoss(self):
     hp = sv2p_params.next_frame_sv2p()
@@ -53,13 +57,16 @@ class NextFrameTest(tests_utils.BaseNextFrameTest):
     self.TestWithActionAndRewards(
         hp,
         sv2p.NextFrameSv2p,
-        1)
+        1,
+        False)
 
   def testSv2pTwoFrames(self):
     self.TestOnVariousInputOutputSizes(
         sv2p_params.next_frame_sv2p(),
         sv2p.NextFrameSv2pTwoFrames,
-        1)
+        1,
+        False)
+
 
 if __name__ == "__main__":
   tf.test.main()

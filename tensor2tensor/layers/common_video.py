@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """Utilities for video."""
 
 from __future__ import absolute_import
@@ -143,6 +144,49 @@ def scheduled_sample_count(ground_truth_x,
   if isinstance(batch_size, int):
     output.set_shape([batch_size] + common_layers.shape_list(output)[1:])
   return output
+
+
+def inject_additional_input(layer, inputs, name, mode="concat"):
+  """Injects the additional input into the layer.
+
+  Args:
+    layer: layer that the input should be injected to.
+    inputs: inputs to be injected.
+    name: TF scope name.
+    mode: how the infor should be added to the layer:
+      "concat" concats as additional channels.
+      "multiplicative" broadcasts inputs and multiply them to the channels.
+      "multi_additive" broadcasts inputs and multiply and add to the channels.
+
+  Returns:
+    updated layer.
+
+  Raises:
+    ValueError: in case of unknown mode.
+  """
+  layer_shape = common_layers.shape_list(layer)
+  input_shape = common_layers.shape_list(inputs)
+  zeros_mask = tf.zeros(layer_shape, dtype=tf.float32)
+  if mode == "concat":
+    emb = encode_to_shape(inputs, layer_shape, name)
+    layer = tf.concat(values=[layer, emb], axis=-1)
+  elif mode == "multiplicative":
+    filters = layer_shape[-1]
+    input_reshaped = tf.reshape(inputs, [-1, 1, 1, input_shape[-1]])
+    input_mask = tf.layers.dense(input_reshaped, filters, name=name)
+    input_broad = input_mask + zeros_mask
+    layer *= input_broad
+  elif mode == "multi_additive":
+    filters = layer_shape[-1]
+    input_reshaped = tf.reshape(inputs, [-1, 1, 1, input_shape[-1]])
+    input_mul = tf.layers.dense(input_reshaped, filters, name=name + "_mul")
+    layer *= tf.nn.sigmoid(input_mul)
+    input_add = tf.layers.dense(input_reshaped, filters, name=name + "_add")
+    layer += input_add
+  else:
+    raise ValueError("Unknown injection mode: %s" % mode)
+
+  return layer
 
 
 def scheduled_sample_prob(ground_truth_x,
@@ -553,6 +597,46 @@ def beta_schedule(schedule, global_step, final_beta, decay_start, decay_end):
           tf.greater(global_step, decay_end): lambda: final_beta},
       default=lambda: increased_value)
   return beta
+
+
+def extract_random_video_patch(videos, num_frames=-1):
+  """For every video, extract a random consecutive patch of num_frames.
+
+  Args:
+    videos: 5-D Tensor, (NTHWC)
+    num_frames: Integer, if -1 then the entire video is returned.
+  Returns:
+    video_patch: 5-D Tensor, (NTHWC) with T = num_frames.
+  Raises:
+    ValueError: If num_frames is greater than the number of total frames in
+                the video.
+  """
+  if num_frames == -1:
+    return videos
+  batch_size, num_total_frames, h, w, c = common_layers.shape_list(videos)
+  if num_total_frames < num_frames:
+    raise ValueError("Expected num_frames <= %d, got %d" %
+                     (num_total_frames, num_frames))
+
+  # Randomly choose start_inds for each video.
+  frame_start = tf.random_uniform(
+      shape=(batch_size,), minval=0, maxval=num_total_frames - num_frames + 1,
+      dtype=tf.int32)
+
+  # [start[0], start[0] + 1, ... start[0] + num_frames - 1] + ...
+  # [start[batch_size-1], ... start[batch_size-1] + num_frames - 1]
+  range_inds = tf.expand_dims(tf.range(num_frames), axis=0)
+  frame_inds = range_inds + tf.expand_dims(frame_start, axis=1)
+  frame_inds = tf.reshape(frame_inds, [-1])
+
+  # [0]*num_frames + [1]*num_frames + ... [batch_size-1]*num_frames
+  batch_inds = tf.expand_dims(tf.range(batch_size), axis=1)
+  batch_inds = tf.tile(batch_inds, [1, num_frames])
+  batch_inds = tf.reshape(batch_inds, [-1])
+
+  gather_inds = tf.stack((batch_inds, frame_inds), axis=1)
+  video_patches = tf.gather_nd(videos, gather_inds)
+  return tf.reshape(video_patches, (batch_size, num_frames, h, w, c))
 
 
 class VideoWriter(object):

@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """Hyperparameters and ranges common to multiple models."""
 
 from __future__ import absolute_import
@@ -286,6 +287,8 @@ def basic_params1():
       # There could be a performance drop if host_call function is slow and
       # cannot keep up with the TPU-side computation.
       tpu_enable_host_call=False,
+      # Pad batch dim of inputs to nearest multiple of batch multiple.
+      pad_batch=False,
   )
 
 

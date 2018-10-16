@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """Batch of environments inside the TensorFlow graph."""
 
 from __future__ import absolute_import
@@ -221,13 +222,14 @@ class StackWrapper(WrapperBase):
 class AutoencoderWrapper(WrapperBase):
   """Transforms the observations taking the bottleneck of an autoencoder."""
 
-  def __init__(self, batch_env):
+  def __init__(self, batch_env, ae_hparams_set):
     super(AutoencoderWrapper, self).__init__(batch_env)
+    self.ae_hparams_set = ae_hparams_set
     self._observ = tf.Variable(
         tf.zeros((len(self),) + self.observ_shape, self.observ_dtype),
         trainable=False)
     with tf.variable_scope(tf.get_variable_scope(), reuse=tf.AUTO_REUSE):
-      autoencoder_hparams = autoencoders.autoencoder_discrete_pong()
+      autoencoder_hparams = registry.hparams(self.ae_hparams_set)
       problem = registry.problem("dummy_autoencoder_problem")
       autoencoder_hparams.problem_hparams = problem.get_hparams(
           autoencoder_hparams)
@@ -249,7 +251,7 @@ class AutoencoderWrapper(WrapperBase):
   @property
   def autoencoder_factor(self):
     """By how much to divide sizes when using autoencoders."""
-    hparams = autoencoders.autoencoder_discrete_pong()
+    hparams = registry.hparams(self.ae_hparams_set)
     return 2**hparams.num_hidden_layers
 
   def simulate(self, action):
@@ -285,11 +287,14 @@ class AutoencoderWrapper(WrapperBase):
 class ResizeWrapper(WrapperBase):
   """Resizes the observations."""
 
-  def __init__(self, batch_env, height_factor=1, width_factor=1):
+  def __init__(self, batch_env, height_factor=1, width_factor=1,
+               grayscale=False):
     super(ResizeWrapper, self).__init__(batch_env)
     self._height_factor = height_factor  # How much to resize on x axis.
     self._width_factor = width_factor  # How much to resize on y axis.
-    self._is_identity = (height_factor == 1) and (width_factor == 1)
+    self._do_grayscale = grayscale  # Whether to convert to grayscale.
+    self._is_identity = ((height_factor == 1) and (width_factor == 1)
+                         and not grayscale)
     if not self._is_identity:
       self._observ = tf.Variable(
           tf.zeros((len(self),) + self.observ_shape, self.observ_dtype),
@@ -298,8 +303,9 @@ class ResizeWrapper(WrapperBase):
       self._observ = self._batch_env.observ
 
   def __str__(self):
-    return "ResizeWrapper%d%d(%s)" % (self._height_factor,
-                                      self._width_factor, str(self._batch_env))
+    return "ResizeWrapperh%dw%dg%d(%s)" % (
+        self._height_factor, self._width_factor, int(self._do_grayscale),
+        str(self._batch_env))
 
   def _resize(self, tensor):
     if self._is_identity:
@@ -308,11 +314,15 @@ class ResizeWrapper(WrapperBase):
     observ = tf.to_float(tensor)
     resized = tf.image.resize_images(
         observ, [height, width], tf.image.ResizeMethod.AREA)
+    if self._do_grayscale:
+      resized = tf.image.rgb_to_grayscale(resized)
     return tf.cast(resized, self.observ_dtype)
 
   @property
   def observ_shape(self):
     height, width, channels = self._batch_env.observ_shape
+    if self._do_grayscale:
+      channels = 1
     resized_height = height // self._height_factor
     resized_width = width // self._width_factor
     return (resized_height, resized_width, channels)
@@ -362,9 +372,6 @@ class IntToBitWrapper(WrapperBase):
     return (height, width, channels*8)
 
   def simulate(self, action):
-    action = tf.Print(action, [action], message="action=", summarize=200)
-
-    # action = tf.zeros_like(action) #Temporary hacked bugfix
     reward, done = self._batch_env.simulate(action)
     with tf.control_dependencies([reward, done]):
       with tf.variable_scope(tf.get_variable_scope(), reuse=tf.AUTO_REUSE):

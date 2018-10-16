@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """Self-attention based language model.
 
 Like transformer.py, but no encoder
@@ -79,8 +80,8 @@ LAYER_SYMBOLS = {
 class AttentionLmMoe(t2t_model.T2TModel):
   """Attention net.  See file docstring."""
 
-  @property
-  def use_body_sharded(self):
+  @staticmethod
+  def use_body_sharded():
     return True
 
   def body_sharded(self, sharded_features):

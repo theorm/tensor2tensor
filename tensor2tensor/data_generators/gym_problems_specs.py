@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """Definitions of data generators for gym problems."""
 
 from __future__ import absolute_import
@@ -66,8 +67,6 @@ ATARI_GAMES_WITH_HUMAN_SCORE = [
     "up_n_down", "video_pinball", "yars_revenge",
 ]
 
-ATARI_ALL_MODES_SHORT_LIST = []
-
 ATARI_WHITELIST_GAMES = [
     "amidar",
     "bank_heist",
@@ -94,6 +93,20 @@ ATARI_CURIOUS_GAMES = [
     "road_runner",
     "up_n_down",
 ]
+
+
+# Games on which based should work.
+ATARI_DEBUG_GAMES = [
+    "crazy_climber",
+    "freeway",
+    "pong",
+]
+
+
+# Games for which we hard-define problems to run all around.
+# TODO(lukaszkaiser): global registration makes them all rescaled and grayscale,
+# no matter the setting of hparams later (as they're registered at start).
+ATARI_ALL_MODES_SHORT_LIST = []  # ATARI_DEBUG_GAMES + ATARI_CURIOUS_GAMES
 
 
 # Different ATARI game modes in OpenAI Gym. Full list here:
@@ -225,16 +238,20 @@ class GymClippedRewardRandom(GymDiscreteProblem):
 
 def create_problems_for_game(
     game_name,
-    resize_height_factor=1,
-    resize_width_factor=1,
-    game_mode="Deterministic-v4"):
+    resize_height_factor=2,
+    resize_width_factor=2,
+    grayscale=True,
+    game_mode="Deterministic-v4",
+    autoencoder_hparams=None):
   """Create and register problems for game_name.
 
   Args:
     game_name: str, one of the games in ATARI_GAMES, e.g. "bank_heist".
     resize_height_factor: factor by which to resize the height of frames.
     resize_width_factor: factor by which to resize the width of frames.
+    grayscale: whether to make frames grayscale.
     game_mode: the frame skip and sticky keys config.
+    autoencoder_hparams: the hparams for the autoencoder.
 
   Returns:
     dict of problems with keys ("base", "agent", "simulated").
@@ -256,13 +273,25 @@ def create_problems_for_game(
                      (GymClippedRewardRandom,),
                      {"env_name": env_name,
                       "resize_height_factor": resize_height_factor,
-                      "resize_width_factor": resize_width_factor})
+                      "resize_width_factor": resize_width_factor,
+                      "grayscale": grayscale})
   registry.register_problem(problem_cls)
 
   with_agent_cls = type("GymDiscreteProblemWithAgentOn%s" % camel_game_name,
                         (GymRealDiscreteProblem, problem_cls), {})
-
   registry.register_problem(with_agent_cls)
+
+  with_ae_cls = type(
+      "GymDiscreteProblemWithAgentOn%sWithAutoencoder" % camel_game_name,
+      (GymDiscreteProblemWithAutoencoder, problem_cls),
+      {"ae_hparams_set": autoencoder_hparams})
+  registry.register_problem(with_ae_cls)
+
+  ae_cls = type(
+      "GymDiscreteProblemWithAgentOn%sAutoencoded" % camel_game_name,
+      (GymDiscreteProblemAutoencoded, problem_cls),
+      {"ae_hparams_set": autoencoder_hparams})
+  registry.register_problem(ae_cls)
 
   # Create and register the simulated Problem
   simulated_cls = type(
@@ -273,28 +302,38 @@ def create_problems_for_game(
       })
   registry.register_problem(simulated_cls)
 
+  simulated_ae_cls = type(
+      "GymSimulatedDiscreteProblemWithAgentOn%sAutoencoded" % camel_game_name,
+      (GymSimulatedDiscreteProblemAutoencoded, problem_cls), {
+          "initial_frames_problem": ae_cls.name,
+          "num_testing_steps": 100,
+          "ae_hparams_set": autoencoder_hparams
+      })
+  registry.register_problem(simulated_ae_cls)
+
   # Create and register the simulated Problem
   world_model_eval_cls = type(
       "GymSimulatedDiscreteProblemForWorldModelEvalWithAgentOn%s" %
       camel_game_name,
       (GymSimulatedDiscreteProblemForWorldModelEval, problem_cls), {
           "initial_frames_problem": with_agent_cls.name,
-          "num_testing_steps": 100
+          "num_testing_steps": 100,
+          "ae_hparams_set": autoencoder_hparams
       })
   registry.register_problem(world_model_eval_cls)
 
-  return {
-      "base": problem_cls,
-      "agent": with_agent_cls,
-      "simulated": simulated_cls,
-      "world_model_eval": world_model_eval_cls,
-  }
+  world_model_eval_ae_cls = type(
+      "GymSimulatedDiscreteProblemForWorldModelEvalWithAgentOn%sAutoencoded" %
+      camel_game_name,
+      (GymSimulatedDiscreteProblemForWorldModelEvalAutoencoded, problem_cls), {
+          "initial_frames_problem": ae_cls.name,
+          "num_testing_steps": 100,
+          "ae_hparams_set": autoencoder_hparams
+      })
+  registry.register_problem(world_model_eval_ae_cls)
+
 
 # Register the atari games with all of the possible modes.
 for game in ATARI_ALL_MODES_SHORT_LIST:
-  ATARI_PROBLEMS[game] = {}
   for mode in ATARI_GAME_MODES:
-    classes = create_problems_for_game(
-        game,
-        game_mode=mode)
-    ATARI_PROBLEMS[game][mode] = classes
+    create_problems_for_game(game, game_mode=mode)

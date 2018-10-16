@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 r"""Training of model-based RL agent assuming a fully trained world model.
 
 Example invocation:
@@ -29,6 +30,7 @@ from __future__ import print_function
 from tensor2tensor.bin import t2t_trainer  # pylint: disable=unused-import
 from tensor2tensor.data_generators import gym_problems_specs
 from tensor2tensor.rl import trainer_model_based
+from tensor2tensor.rl import trainer_model_based_params
 
 
 import tensorflow as tf
@@ -49,7 +51,7 @@ def get_simulated_problem_name(game):
 
 
 def main(_):
-  hparams = trainer_model_based.create_loop_hparams()
+  hparams = trainer_model_based_params.create_loop_hparams()
   problem_name = get_simulated_problem_name(hparams.game)
   world_model_dir = FLAGS.world_model_dir
   agent_model_dir = FLAGS.output_dir
