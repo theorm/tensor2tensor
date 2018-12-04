@@ -28,6 +28,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+from six.moves import reduce
 
 from tensor2tensor.layers import common_layers
 from tensor2tensor.layers import common_video
@@ -654,11 +655,16 @@ class NextFrameEpva(sv2p.NextFrameSv2pLegacy):
     # all_rewards = tf.concat([input_rewards, target_rewards], axis=0)
 
     all_actions = tf.concat([input_actions, target_actions], axis=0)
+    # flatten actions tensor to have the shape: framesXbatch_sizeXaction_dims.
+    actions_shape = common_layers.shape_list(all_actions)
+    all_actions = tf.reshape(
+        all_actions,
+        [actions_shape[0], -1,
+         reduce(lambda x, y: x * y, actions_shape[2:])])
     all_frames = tf.concat([input_frames, target_frames], axis=0)
 
     all_frames = tf.unstack(all_frames, axis=0)
     all_actions = tf.unstack(all_actions, axis=0)
-    all_actions = [tf.squeeze(a, 1) for a in all_actions]
 
     # TODO(blazej) - most likely this downsize is too strong.
     all_frames = [
@@ -699,6 +705,9 @@ class NextFrameEpva(sv2p.NextFrameSv2pLegacy):
 
     predictions = tf.stack(van_on_enc_all)
 
+    if hparams.clip_pixel_values:
+      predictions = tf.clip_by_value(predictions, 0.0, 1.0)
+
     # TODO(mbz): clean this up!
     def fix_video_dims_and_concat_on_x_axis(x):
       x = tf.transpose(x, [1, 3, 4, 0, 2])
@@ -711,10 +720,18 @@ class NextFrameEpva(sv2p.NextFrameSv2pLegacy):
     side_by_side_video = tf.concat([frames_gd, frames_pd], axis=1)
     tf.summary.image('full_video', side_by_side_video)
 
+    predictions = tf.unstack(predictions)
+    predictions = [
+        tf.image.resize_images(
+            image, (frame_width, frame_height),
+            method=tf.image.ResizeMethod.BICUBIC)
+        for image in predictions
+    ]
+    predictions = tf.stack(predictions)
+
     predictions = common_video.swap_time_and_batch_axes(predictions)
     predictions = tf.slice(predictions,
-                           [0, hparams.video_num_target_frames-1, 0, 0, 0],
+                           [0, hparams.video_num_input_frames-1, 0, 0, 0],
                            [-1]*5)
 
     return predictions, {'extra': epva_loss}
-

@@ -13,31 +13,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Gym generators tests."""
-
+"""Tests of basic flow of collecting trajectories and training PPO."""
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import os
-import shutil
-
-from tensor2tensor.data_generators import gym_problems_specs
+from tensor2tensor.rl import trainer_model_free
+from tensor2tensor.utils import registry
 
 import tensorflow as tf
 
+FLAGS = tf.flags.FLAGS
 
-class GymProblemsTest(tf.test.TestCase):
 
-  @classmethod
-  def setUpClass(cls):
-    cls.tmp_dir = tf.test.get_temp_dir()
-    shutil.rmtree(cls.tmp_dir)
-    os.mkdir(cls.tmp_dir)
+class TrainTest(tf.test.TestCase):
 
-  def testGymAtariGameModes(self):
-    problem = gym_problems_specs.GymDiscreteProblemWithAgentOnWrappedFullPong()
-    self.assertEqual(210, problem.frame_height)
+  def test_train_pong(self):
+    hparams = registry.hparams("mfrl_original")
+    hparams.batch_size = 2
+    hparams.ppo_epochs_num = 2
+    hparams.ppo_epoch_length = 3
+    FLAGS.output_dir = tf.test.get_temp_dir()
+    trainer_model_free.train(hparams, FLAGS.output_dir)
 
 
 if __name__ == "__main__":

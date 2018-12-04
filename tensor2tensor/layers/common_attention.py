@@ -32,6 +32,7 @@ from tensor2tensor.layers import common_layers
 from tensor2tensor.utils import expert_utils
 
 import tensorflow as tf
+import tensorflow_probability as tfp
 
 from tensorflow.python.framework import function
 from tensorflow.python.ops import inplace_ops
@@ -327,9 +328,9 @@ def encoder_decoder_attention_loss(expected_attention_logits,
     return tf.reduce_mean(attentions, [0, 2])
 
   def kl_divergence_loss(expected_logits, actual_logits):
-    p = tf.contrib.distributions.Categorical(logits=expected_logits)
-    q = tf.contrib.distributions.Categorical(logits=actual_logits)
-    return tf.contrib.distributions.kl_divergence(p, q)
+    p = tfp.distributions.Categorical(logits=expected_logits)
+    q = tfp.distributions.Categorical(logits=actual_logits)
+    return tfp.distributions.kl_divergence(p, q)
 
   def mse_loss(expected_logits, actual_weights):
     expected_weights = tf.nn.softmax(expected_logits)
@@ -634,10 +635,11 @@ def add_positional_embedding(x, max_length, name, positions=None):
     _, length, depth = common_layers.shape_list(x)
     var = tf.cast(tf.get_variable(name, [max_length, depth]), x.dtype)
     if positions is None:
+      pad_length = tf.maximum(0, length - max_length)
       sliced = tf.cond(
           tf.less(length, max_length),
           lambda: tf.slice(var, [0, 0], [length, -1]),
-          lambda: tf.pad(var, [[0, max(0, length - max_length)], [0, 0]]))
+          lambda: tf.pad(var, [[0, pad_length], [0, 0]]))
       return x + tf.expand_dims(sliced, 0)
     else:
       return x + tf.gather(var, tf.to_int32(positions))
@@ -1765,7 +1767,7 @@ def dot_product_self_attention_relative_v2(q,
     logits = tf.matmul(q, k, transpose_b=True)
     key_relative_embeddings = get_relative_embeddings_left(
         max_relative_position, length, depth_k, num_heads,
-        heads_share_relative_embedding, "key_relative_embededings")
+        heads_share_relative_embedding, "key_relative_embeddings")
 
     rel_logits = matmul_with_relative_keys(q, key_relative_embeddings,
                                            heads_share_relative_embedding)

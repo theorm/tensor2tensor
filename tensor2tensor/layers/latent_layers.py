@@ -23,10 +23,11 @@ from six.moves import range  # pylint: disable=redefined-builtin
 from tensor2tensor.layers import common_attention
 from tensor2tensor.layers import common_image_attention as cia
 from tensor2tensor.layers import common_layers
-from tensor2tensor.models import transformer
+from tensor2tensor.layers import transformer_layers
 from tensor2tensor.utils import beam_search
 
 import tensorflow as tf
+import tensorflow_probability as tfp
 
 DO_SUMMARIES = True
 
@@ -410,11 +411,10 @@ def transformer_text_encoder(inputs,
         encoder_input,
         encoder_self_attention_bias,
         ed,
-    ] = transformer.transformer_prepare_encoder(inputs,
-                                                target_space=target_space,
-                                                hparams=hparams)
+    ] = transformer_layers.transformer_prepare_encoder(
+        inputs, target_space=target_space, hparams=hparams)
     encoder_input = tf.nn.dropout(encoder_input, 1.0 - hparams.dropout)
-    encoder_output = transformer.transformer_encoder(
+    encoder_output = transformer_layers.transformer_encoder(
         encoder_input, encoder_self_attention_bias, hparams)
     return encoder_output, ed
 
@@ -732,8 +732,8 @@ def iaf_flow(one_hot_assignments,
     # shifting the rest down by one (and removing the last dimension).
     padded_assignments = tf.pad(
         one_hot_assignments, [[0, 0], [0, 0], [1, 0], [0, 0]])[:, :, :-1, :]
-    scale_bijector = tf.contrib.distributions.bijectors.Affine(
-        scale_tril=tf.contrib.distributions.fill_triangular(scale_weights))
+    scale_bijector = tfp.distributions.bijectors.Affine(
+        scale_tril=tfp.distributions.fill_triangular(scale_weights))
     scale = scale_bijector.forward(
         tf.transpose(padded_assignments, [0, 1, 3, 2]))
     # Transpose the bijector output since it performs a batch matmul.

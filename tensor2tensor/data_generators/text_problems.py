@@ -33,7 +33,9 @@ import os
 from tensor2tensor.data_generators import generator_utils
 from tensor2tensor.data_generators import problem
 from tensor2tensor.data_generators import text_encoder
+from tensor2tensor.layers import modalities
 from tensor2tensor.utils import metrics
+from tensor2tensor.utils import mlperf_log
 from tensor2tensor.utils import registry
 
 import tensorflow as tf
@@ -252,6 +254,11 @@ class Text2TextProblem(problem.Problem):
         chop_long_sequences=not self.has_inputs)
 
   def generate_encoded_samples(self, data_dir, tmp_dir, dataset_split):
+    if dataset_split == problem.DatasetSplit.TRAIN:
+      mlperf_log.transformer_print(key=mlperf_log.PREPROC_TOKENIZE_TRAINING)
+    elif dataset_split == problem.DatasetSplit.EVAL:
+      mlperf_log.transformer_print(key=mlperf_log.PREPROC_TOKENIZE_EVAL)
+
     generator = self.generate_samples(data_dir, tmp_dir, dataset_split)
     encoder = self.get_or_create_vocab(data_dir, tmp_dir)
     return text2text_generate_encoded(generator, encoder,
@@ -273,6 +280,10 @@ class Text2TextProblem(problem.Problem):
   def batch_size_means_tokens(self):
     return True
 
+  @property
+  def already_shuffled(self):
+    return False
+
   def generate_data(self, data_dir, tmp_dir, task_id=-1):
 
     filepath_fns = {
@@ -282,7 +293,7 @@ class Text2TextProblem(problem.Problem):
     }
 
     split_paths = [(split["split"], filepath_fns[split["split"]](
-        data_dir, split["shards"], shuffled=False))
+        data_dir, split["shards"], shuffled=self.already_shuffled))
                    for split in self.dataset_splits]
     all_paths = []
     for _, paths in split_paths:
@@ -305,23 +316,24 @@ class Text2TextProblem(problem.Problem):
     p = defaults
     p.stop_at_eos = int(True)
 
+    p.modality = {"targets": modalities.SymbolModality}
+    p.vocab_size = {"targets": self._encoders["targets"].vocab_size}
     if self.has_inputs:
-      source_vocab_size = self._encoders["inputs"].vocab_size
-      p.input_modality = {
-          "inputs": (registry.Modalities.SYMBOL, source_vocab_size)
-      }
-    target_vocab_size = self._encoders["targets"].vocab_size
-    p.target_modality = (registry.Modalities.SYMBOL, target_vocab_size)
+      p.modality["inputs"] = modalities.SymbolModality
+      p.vocab_size["inputs"] = self._encoders["inputs"].vocab_size
     if self.vocab_type == VocabType.CHARACTER:
       p.loss_multiplier = 2.0
 
     if self.packed_length:
-      identity = (registry.Modalities.GENERIC, None)
       if self.has_inputs:
-        p.input_modality["inputs_segmentation"] = identity
-        p.input_modality["inputs_position"] = identity
-      p.input_modality["targets_segmentation"] = identity
-      p.input_modality["targets_position"] = identity
+        p.modality["inputs_segmentation"] = modalities.IdentityModality
+        p.modality["inputs_position"] = modalities.IdentityModality
+        p.vocab_size["inputs_segmentation"] = None
+        p.vocab_size["inputs_position"] = None
+      p.modality["targets_segmentation"] = modalities.IdentityModality
+      p.modality["targets_position"] = modalities.IdentityModality
+      p.vocab_size["targets_segmentation"] = None
+      p.vocab_size["targets_position"] = None
 
   def example_reading_spec(self):
     data_fields = {"targets": tf.VarLenFeature(tf.int64)}
@@ -390,9 +402,8 @@ class QuestionAndContext2TextProblem(Text2TextProblem):
     (super(QuestionAndContext2TextProblem, self)
      .hparams(defaults, unused_model_hparams))
     p = defaults
-    source_vocab_size = self._encoders["context"].vocab_size
-    p.input_modality["context"] = (registry.Modalities.SYMBOL,
-                                   source_vocab_size)
+    p.modality["context"] = modalities.SymbolModality
+    p.vocab_size["context"] = self._encoders["context"].vocab_size
     if self.packed_length:
       raise NotImplementedError("QuestionAndContext2Text does not "
                                 "support packed_length")
@@ -495,11 +506,10 @@ class Text2ClassProblem(Text2TextProblem):
 
   def hparams(self, defaults, unused_model_hparams):
     p = defaults
-    source_vocab_size = self._encoders["inputs"].vocab_size
-    p.input_modality = {
-        "inputs": (registry.Modalities.SYMBOL, source_vocab_size)
-    }
-    p.target_modality = (registry.Modalities.CLASS_LABEL, self.num_classes)
+    p.modality = {"inputs": modalities.SymbolModality,
+                  "targets": modalities.ClassLabelModality}
+    p.vocab_size = {"inputs": self._encoders["inputs"].vocab_size,
+                    "targets": self.num_classes}
 
   def example_reading_spec(self):
     data_fields = {
@@ -533,9 +543,9 @@ class TextConcat2ClassProblem(Text2ClassProblem):
       inputs = []
       for idx, inp in enumerate(sample["inputs"]):
         inputs += encoder.encode(inp)
-        inputs.append(text_encoder.EOS_ID)
         if idx < len(sample["inputs"]) - 1:
           inputs.append(encoder.encode(self.CONCAT_TOKEN)[0])
+      inputs.append(text_encoder.EOS_ID)
       label = sample["label"]
       yield {"inputs": inputs, "targets": [label]}
 

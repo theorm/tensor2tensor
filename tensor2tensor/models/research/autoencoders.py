@@ -24,6 +24,7 @@ from tensor2tensor.layers import common_hparams
 from tensor2tensor.layers import common_layers
 from tensor2tensor.layers import discretization
 from tensor2tensor.layers import latent_layers
+from tensor2tensor.layers import modalities
 from tensor2tensor.utils import registry
 from tensor2tensor.utils import t2t_model
 
@@ -158,11 +159,7 @@ class AutoencoderBasic(t2t_model.T2TModel):
   def gumbel_sample(self, reconstr_gan):
     hparams = self.hparams
     is_training = hparams.mode == tf.estimator.ModeKeys.TRAIN
-    if isinstance(self._problem_hparams.target_modality, dict):
-      vocab_size = self._problem_hparams.target_modality[
-          "targets"].top_dimensionality
-    else:
-      vocab_size = self._problem_hparams.target_modality.top_dimensionality
+    vocab_size = self._problem_hparams.modality["targets"].top_dimensionality
     reconstr_gan = tf.nn.log_softmax(reconstr_gan)
     if is_training and hparams.gumbel_temperature > 0.0:
       gumbel_samples = discretization.gumbel_sample(
@@ -183,11 +180,7 @@ class AutoencoderBasic(t2t_model.T2TModel):
   def body(self, features):
     hparams = self.hparams
     is_training = hparams.mode == tf.estimator.ModeKeys.TRAIN
-    if isinstance(self._problem_hparams.target_modality, dict):
-      vocab_size = self._problem_hparams.target_modality[
-          "targets"].top_dimensionality
-    else:
-      vocab_size = self._problem_hparams.target_modality.top_dimensionality
+    vocab_size = self._problem_hparams.modality["targets"].top_dimensionality
     encoder_layers = None
     self.is1d = hparams.sample_width == 1
     if (hparams.mode != tf.estimator.ModeKeys.PREDICT
@@ -466,7 +459,7 @@ class AutoencoderAutoregressive(AutoencoderBasic):
       plain_training_loss = losses.pop("training")
       losses["plain"] = plain_training_loss
     res_shape = common_layers.shape_list(basic_result)
-    vocab_size = self._problem_hparams.target_modality.top_dimensionality
+    vocab_size = self._problem_hparams.modality["targets"].top_dimensionality
     targets = tf.one_hot(features["targets_raw"], vocab_size)
     # Prepare inputs for autoregressive modes.
     if common_layers.shape_list(features["targets"])[1] == 1:
@@ -1112,8 +1105,10 @@ def autoencoder_residual_text():
   hparams.hidden_size = 64
   hparams.max_hidden_size = 512
   hparams.bottleneck_noise = 0.0
-  hparams.target_modality = "symbol:identity"
-  hparams.input_modalities = "symbol:identity"
+  hparams.modality = {
+      "inputs": modalities.IdentitySymbolModality,
+      "targets": modalities.IdentitySymbolModality,
+  }
   hparams.autoregressive_mode = "none"
   hparams.sample_width = 1
   return hparams
@@ -1217,8 +1212,10 @@ def autoencoder_ordered_text():
   hparams.batch_size = 1024
   hparams.autoregressive_mode = "conv5"
   hparams.max_hidden_size = 1024
-  hparams.target_modality = "symbol:identity"
-  hparams.input_modalities = "symbol:identity"
+  hparams.modality = {
+      "inputs": modalities.IdentitySymbolModality,
+      "targets": modalities.IdentitySymbolModality,
+  }
   hparams.sample_height = 128
   hparams.sample_width = 1
   return hparams

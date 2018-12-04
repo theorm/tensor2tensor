@@ -32,8 +32,10 @@ from tensor2tensor.data_generators import librispeech
 from tensor2tensor.layers import common_attention
 from tensor2tensor.layers import common_hparams
 from tensor2tensor.layers import common_layers
+from tensor2tensor.layers import transformer_layers
 from tensor2tensor.utils import beam_search
 from tensor2tensor.utils import expert_utils
+from tensor2tensor.utils import mlperf_log
 from tensor2tensor.utils import registry
 from tensor2tensor.utils import t2t_model
 
@@ -41,6 +43,12 @@ import tensorflow as tf
 
 from tensorflow.python.ops import inplace_ops
 from tensorflow.python.util import nest
+
+
+# Alias some commonly reused layers, here and elsewhere.
+transformer_prepare_encoder = transformer_layers.transformer_prepare_encoder
+transformer_encoder = transformer_layers.transformer_encoder
+transformer_ffn_layer = transformer_layers.transformer_ffn_layer
 
 
 @registry.register_model
@@ -76,6 +84,11 @@ class Transformer(t2t_model.T2TModel):
         transformer_prepare_encoder(
             inputs, target_space, hparams, features=features))
 
+    mlperf_log.transformer_print(
+        key=mlperf_log.MODEL_HP_LAYER_POSTPROCESS_DROPOUT,
+        value=hparams.layer_prepostprocess_dropout,
+        hparams=hparams)
+
     encoder_input = tf.nn.dropout(encoder_input,
                                   1.0 - hparams.layer_prepostprocess_dropout)
 
@@ -85,6 +98,7 @@ class Transformer(t2t_model.T2TModel):
         hparams,
         nonpadding=features_to_nonpadding(features, "inputs"),
         save_weights_to=self.attention_weights,
+        make_image_summary=not common_layers.is_xla_compiled(),
         losses=losses)
 
     return encoder_output, encoder_decoder_attention_bias
@@ -121,6 +135,10 @@ class Transformer(t2t_model.T2TModel):
     Returns:
       Final decoder representation. [batch_size, decoder_length, hidden_dim]
     """
+    mlperf_log.transformer_print(
+        key=mlperf_log.MODEL_HP_LAYER_POSTPROCESS_DROPOUT,
+        value=hparams.layer_prepostprocess_dropout,
+        hparams=hparams)
     decoder_input = tf.nn.dropout(decoder_input,
                                   1.0 - hparams.layer_prepostprocess_dropout)
 
@@ -308,7 +326,7 @@ class Transformer(t2t_model.T2TModel):
           " of the dataset when decoding.")
     dp = self._data_parallelism
     hparams = self._hparams
-    target_modality = self._problem_hparams.target_modality
+    target_modality = self._problem_hparams.modality["targets"]
 
     if self.has_input:
       inputs = features["inputs"]
@@ -328,7 +346,7 @@ class Transformer(t2t_model.T2TModel):
       inputs = tf.reshape(inputs, [s[0] * s[1], s[2], s[3], s[4]])
       # _shard_features called to ensure that the variable names match
       inputs = self._shard_features({"inputs": inputs})["inputs"]
-      input_modality = self._problem_hparams.input_modality["inputs"]
+      input_modality = self._problem_hparams.modality["inputs"]
       with tf.variable_scope(input_modality.name):
         inputs = input_modality.bottom_sharded(inputs, dp)
       with tf.variable_scope("body"):
@@ -521,7 +539,7 @@ class Transformer(t2t_model.T2TModel):
       raise NotImplementedError("Fast decoding only supports a single shard.")
     dp = self._data_parallelism
     hparams = self._hparams
-    target_modality = self._problem_hparams.target_modality
+    target_modality = self._problem_hparams.modality["targets"]
     if "targets_segmentation" in features:
       raise NotImplementedError(
           "Decoding not supported on packed datasets "
@@ -545,7 +563,7 @@ class Transformer(t2t_model.T2TModel):
       inputs = tf.reshape(inputs, [s[0] * s[1], s[2], s[3], s[4]])
       # _shard_features called to ensure that the variable names match
       inputs = self._shard_features({"inputs": inputs})["inputs"]
-      input_modality = self._problem_hparams.input_modality["inputs"]
+      input_modality = self._problem_hparams.modality["inputs"]
       with tf.variable_scope(input_modality.name):
         inputs = input_modality.bottom_sharded(inputs, dp)
       with tf.variable_scope("body"):
@@ -778,6 +796,16 @@ def fast_decode_tpu(encoder_output,
     cache["encoder_output"] = encoder_output
     cache["encoder_decoder_attention_bias"] = encoder_decoder_attention_bias
 
+  mlperf_log.transformer_print(
+      key=mlperf_log.MODEL_HP_SEQ_BEAM_SEARCH,
+      value={
+          "vocab_size": vocab_size,
+          "batch_size": batch_size,
+          "beam_size": beam_size,
+          "alpha": alpha,
+          "max_decode_length": decode_length
+      },
+      hparams=hparams)
   if beam_size > 1:  # Beam Search
     initial_ids = sos_id * tf.ones([batch_size], dtype=tf.int32)
     decoded_ids, scores = beam_search.beam_search(
@@ -1091,75 +1119,6 @@ def features_to_nonpadding(features, inputs_or_targets="inputs"):
   return None
 
 
-def transformer_prepare_encoder(inputs, target_space, hparams, features=None):
-  """Prepare one shard of the model for the encoder.
-
-  Args:
-    inputs: a Tensor.
-    target_space: a Tensor.
-    hparams: run hyperparameters
-    features: optionally pass the entire features dictionary as well.
-      This is needed now for "packed" datasets.
-
-  Returns:
-    encoder_input: a Tensor, bottom of encoder stack
-    encoder_self_attention_bias: a bias tensor for use in encoder self-attention
-    encoder_decoder_attention_bias: a bias tensor for use in encoder-decoder
-      attention
-  """
-  ishape_static = inputs.shape.as_list()
-  encoder_input = inputs
-  if features and "inputs_segmentation" in features:
-    # Packed dataset.  Keep the examples from seeing each other.
-    inputs_segmentation = features["inputs_segmentation"]
-    inputs_position = features["inputs_position"]
-    targets_segmentation = features["targets_segmentation"]
-    encoder_self_attention_bias = common_attention.attention_bias_same_segment(
-        inputs_segmentation, inputs_segmentation)
-    encoder_decoder_attention_bias = (
-        common_attention.attention_bias_same_segment(targets_segmentation,
-                                                     inputs_segmentation))
-  else:
-    # Usual case - not a packed dataset.
-    encoder_padding = common_attention.embedding_to_padding(encoder_input)
-    ignore_padding = common_attention.attention_bias_ignore_padding(
-        encoder_padding)
-    encoder_self_attention_bias = ignore_padding
-    encoder_decoder_attention_bias = ignore_padding
-    inputs_position = None
-  if hparams.proximity_bias:
-    encoder_self_attention_bias += common_attention.attention_bias_proximal(
-        common_layers.shape_list(inputs)[1])
-  if hparams.get("use_target_space_embedding", True):
-    # Append target_space_id embedding to inputs.
-    emb_target_space = common_layers.embedding(
-        target_space,
-        32,
-        ishape_static[-1],
-        name="target_space_embedding",
-        dtype=tf.bfloat16
-        if hparams.activation_dtype == "bfloat16" else tf.float32)
-    emb_target_space = tf.reshape(emb_target_space, [1, 1, -1])
-    encoder_input += emb_target_space
-  if hparams.pos == "timing":
-    if inputs_position is not None:
-      encoder_input = common_attention.add_timing_signal_1d_given_position(
-          encoder_input, inputs_position)
-    else:
-      encoder_input = common_attention.add_timing_signal_1d(encoder_input)
-  elif hparams.pos == "emb":
-    encoder_input = common_attention.add_positional_embedding(
-        encoder_input, hparams.max_length, "inputs_positional_embedding",
-        inputs_position)
-  if hparams.activation_dtype == "bfloat16":
-    encoder_self_attention_bias = tf.cast(encoder_self_attention_bias,
-                                          tf.bfloat16)
-    encoder_decoder_attention_bias = tf.cast(encoder_decoder_attention_bias,
-                                             tf.bfloat16)
-  return (encoder_input, encoder_self_attention_bias,
-          encoder_decoder_attention_bias)
-
-
 def transformer_prepare_decoder(targets, hparams, features=None):
   """Prepare one shard of the model for the decoder.
 
@@ -1218,89 +1177,6 @@ def transformer_prepare_decoder(targets, hparams, features=None):
   return (decoder_input, decoder_self_attention_bias)
 
 
-def transformer_encoder(encoder_input,
-                        encoder_self_attention_bias,
-                        hparams,
-                        name="encoder",
-                        nonpadding=None,
-                        save_weights_to=None,
-                        make_image_summary=True,
-                        losses=None):
-  """A stack of transformer layers.
-
-  Args:
-    encoder_input: a Tensor
-    encoder_self_attention_bias: bias Tensor for self-attention
-       (see common_attention.attention_bias())
-    hparams: hyperparameters for model
-    name: a string
-    nonpadding: optional Tensor with shape [batch_size, encoder_length]
-      indicating what positions are not padding.  This must either be
-      passed in, which we do for "packed" datasets, or inferred from
-      encoder_self_attention_bias.  The knowledge about padding is used
-      for pad_remover(efficiency) and to mask out padding in convolutional
-      layers.
-    save_weights_to: an optional dictionary to capture attention weights
-      for visualization; the weights tensor will be appended there under
-      a string key created from the variable scope (including name).
-    make_image_summary: Whether to make an attention image summary.
-    losses: optional list onto which to append extra training losses
-
-  Returns:
-    y: a Tensors
-  """
-  x = encoder_input
-  attention_dropout_broadcast_dims = (
-      common_layers.comma_separated_string_to_integer_list(
-          getattr(hparams, "attention_dropout_broadcast_dims", "")))
-  with tf.variable_scope(name):
-    if nonpadding is not None:
-      padding = 1.0 - nonpadding
-    else:
-      padding = common_attention.attention_bias_to_padding(
-          encoder_self_attention_bias)
-      nonpadding = 1.0 - padding
-    pad_remover = None
-    if hparams.use_pad_remover and not common_layers.is_xla_compiled():
-      pad_remover = expert_utils.PadRemover(padding)
-    for layer in range(hparams.num_encoder_layers or hparams.num_hidden_layers):
-      with tf.variable_scope("layer_%d" % layer):
-        with tf.variable_scope("self_attention"):
-          y = common_attention.multihead_attention(
-              common_layers.layer_preprocess(x, hparams),
-              None,
-              encoder_self_attention_bias,
-              hparams.attention_key_channels or hparams.hidden_size,
-              hparams.attention_value_channels or hparams.hidden_size,
-              hparams.hidden_size,
-              hparams.num_heads,
-              hparams.attention_dropout,
-              attention_type=hparams.self_attention_type,
-              max_relative_position=hparams.max_relative_position,
-              heads_share_relative_embedding=(
-                  hparams.heads_share_relative_embedding),
-              add_relative_to_values=hparams.add_relative_to_values,
-              save_weights_to=save_weights_to,
-              make_image_summary=make_image_summary,
-              dropout_broadcast_dims=attention_dropout_broadcast_dims,
-              max_length=hparams.get("max_length"),
-              vars_3d=hparams.get("attention_variables_3d"))
-          x = common_layers.layer_postprocess(x, y, hparams)
-        with tf.variable_scope("ffn"):
-          y = transformer_ffn_layer(
-              common_layers.layer_preprocess(x, hparams),
-              hparams,
-              pad_remover,
-              conv_padding="SAME",
-              nonpadding_mask=nonpadding,
-              losses=losses)
-          x = common_layers.layer_postprocess(x, y, hparams)
-    # if normalization is done in layer_preprocess, then it should also be done
-    # on the output, since the output can grow very large, being the sum of
-    # a whole stack of unnormalized layer outputs.
-    return common_layers.layer_preprocess(x, hparams)
-
-
 def transformer_decoder(decoder_input,
                         encoder_output,
                         decoder_self_attention_bias,
@@ -1346,6 +1222,24 @@ def transformer_decoder(decoder_input,
   attention_dropout_broadcast_dims = (
       common_layers.comma_separated_string_to_integer_list(
           getattr(hparams, "attention_dropout_broadcast_dims", "")))
+
+  mlperf_log.transformer_print(
+      key=mlperf_log.MODEL_HP_NUM_HIDDEN_LAYERS,
+      value=hparams.num_decoder_layers or hparams.num_hidden_layers,
+      hparams=hparams)
+  mlperf_log.transformer_print(
+      key=mlperf_log.MODEL_HP_ATTENTION_DROPOUT,
+      value=hparams.attention_dropout,
+      hparams=hparams)
+  mlperf_log.transformer_print(
+      key=mlperf_log.MODEL_HP_ATTENTION_DENSE,
+      value={
+          "use_bias": "false",
+          "num_heads": hparams.num_heads,
+          "hidden_size": hparams.hidden_size
+      },
+      hparams=hparams)
+
   with tf.variable_scope(name):
     for layer in range(hparams.num_decoder_layers or hparams.num_hidden_layers):
       layer_name = "layer_%d" % layer
@@ -1409,131 +1303,11 @@ def transformer_decoder(decoder_input,
     # if normalization is done in layer_preprocess, then it should also be done
     # on the output, since the output can grow very large, being the sum of
     # a whole stack of unnormalized layer outputs.
-    return common_layers.layer_preprocess(x, hparams)
-
-
-def transformer_ffn_layer(x,
-                          hparams,
-                          pad_remover=None,
-                          conv_padding="LEFT",
-                          nonpadding_mask=None,
-                          losses=None,
-                          cache=None,
-                          decode_loop_step=None,
-                          readout_filter_size=0):
-  """Feed-forward layer in the transformer.
-
-  Args:
-    x: a Tensor of shape [batch_size, length, hparams.hidden_size]
-    hparams: hyperparameters for model
-    pad_remover: an expert_utils.PadRemover object tracking the padding
-      positions. If provided, when using convolutional settings, the padding
-      is removed before applying the convolution, and restored afterward. This
-      can give a significant speedup.
-    conv_padding: a string - either "LEFT" or "SAME".
-    nonpadding_mask: an optional Tensor with shape [batch_size, length].
-      needed for convolutional layers with "SAME" padding.
-      Contains 1.0 in positions corresponding to nonpadding.
-    losses: optional list onto which to append extra training losses
-    cache: dict, containing tensors which are the results of previous
-        attentions, used for fast decoding.
-    decode_loop_step: An integer, step number of the decoding loop.
-        Only used for inference on TPU.
-    readout_filter_size: if it's greater than 0, then it will be used instead of
-      filter_size
-
-
-  Returns:
-    a Tensor of shape [batch_size, length, hparams.hidden_size]
-
-  Raises:
-    ValueError: If losses arg is None, but layer generates extra losses.
-  """
-  ffn_layer = hparams.ffn_layer
-  relu_dropout_broadcast_dims = (
-      common_layers.comma_separated_string_to_integer_list(
-          getattr(hparams, "relu_dropout_broadcast_dims", "")))
-  if ffn_layer == "conv_hidden_relu":
-    # Backwards compatibility
-    ffn_layer = "dense_relu_dense"
-  if ffn_layer == "dense_relu_dense":
-    # In simple convolution mode, use `pad_remover` to speed up processing.
-    if pad_remover:
-      original_shape = common_layers.shape_list(x)
-      # Collapse `x` across examples, and remove padding positions.
-      x = tf.reshape(x, tf.concat([[-1], original_shape[2:]], axis=0))
-      x = tf.expand_dims(pad_remover.remove(x), axis=0)
-    conv_output = common_layers.dense_relu_dense(
-        x,
-        hparams.filter_size,
-        hparams.hidden_size,
-        dropout=hparams.relu_dropout,
-        dropout_broadcast_dims=relu_dropout_broadcast_dims)
-    if pad_remover:
-      # Restore `conv_output` to the original shape of `x`, including padding.
-      conv_output = tf.reshape(
-          pad_remover.restore(tf.squeeze(conv_output, axis=0)), original_shape)
-    return conv_output
-  elif ffn_layer == "conv_relu_conv":
-    return common_layers.conv_relu_conv(
-        x,
-        readout_filter_size or hparams.filter_size,
-        hparams.hidden_size,
-        first_kernel_size=hparams.conv_first_kernel,
-        second_kernel_size=1,
-        padding=conv_padding,
-        nonpadding_mask=nonpadding_mask,
-        dropout=hparams.relu_dropout,
-        cache=cache,
-        decode_loop_step=decode_loop_step)
-  elif ffn_layer == "parameter_attention":
-    return common_attention.parameter_attention(
-        x, hparams.parameter_attention_key_channels or hparams.hidden_size,
-        hparams.parameter_attention_value_channels or hparams.hidden_size,
-        hparams.hidden_size, readout_filter_size or hparams.filter_size,
-        hparams.num_heads,
-        hparams.attention_dropout)
-  elif ffn_layer == "conv_hidden_relu_with_sepconv":
-    return common_layers.conv_hidden_relu(
-        x,
-        readout_filter_size or hparams.filter_size,
-        hparams.hidden_size,
-        kernel_size=(3, 1),
-        second_kernel_size=(31, 1),
-        padding="LEFT",
-        dropout=hparams.relu_dropout)
-  elif ffn_layer == "sru":
-    return common_layers.sru(x)
-  elif ffn_layer == "local_moe_tpu":
-    overhead = (
-        hparams.moe_overhead_train
-        if hparams.mode == tf.estimator.ModeKeys.TRAIN else
-        hparams.moe_overhead_eval)
-    ret, loss = expert_utils.local_moe_tpu(
-        x,
-        hparams.filter_size // 2,
-        hparams.hidden_size,
-        hparams.moe_num_experts,
-        overhead=overhead,
-        loss_coef=hparams.moe_loss_coef)
-  elif ffn_layer == "local_moe":
-    overhead = (
-        hparams.moe_overhead_train
-        if hparams.mode == tf.estimator.ModeKeys.TRAIN else
-        hparams.moe_overhead_eval)
-    ret, loss = expert_utils.local_moe(
-        x,
-        True,
-        expert_utils.ffn_expert_fn(hparams.hidden_size, [hparams.filter_size],
-                                   hparams.hidden_size),
-        hparams.moe_num_experts,
-        k=hparams.moe_k,
+    mlperf_log.transformer_print(
+        key=mlperf_log.MODEL_HP_NORM,
+        value={"hidden_size": hparams.hidden_size},
         hparams=hparams)
-    losses.append(loss)
-    return ret
-  else:
-    assert ffn_layer == "none"
-    return x
+    return common_layers.layer_preprocess(x, hparams)
 
 
 @registry.register_hparams
@@ -1593,6 +1367,10 @@ def transformer_base_v1():
   hparams.add_hparam("moe_overhead_eval", 2.0)
   hparams.moe_num_experts = 16
   hparams.moe_loss_coef = 1e-3
+  # If specified, use this value instead of problem name in metrics.py.
+  # This is useful for programs that can automatically compare experiments side
+  #   by side based on the same metric names.
+  hparams.add_hparam("overload_eval_metric_name", "")
   return hparams
 
 
@@ -1741,6 +1519,9 @@ def transformer_big():
   hparams = transformer_base()
   hparams.hidden_size = 1024
   hparams.filter_size = 4096
+  # Reduce batch size to 2048 from 4096 to be able to train the model on a GPU
+  # with 12 GB memory. For example, NVIDIA TITAN V GPU.
+  hparams.batch_size = 2048
   hparams.num_heads = 16
   hparams.layer_prepostprocess_dropout = 0.3
   return hparams
@@ -1748,20 +1529,95 @@ def transformer_big():
 
 @registry.register_hparams
 def transformer_tall():
-  """Hparams for transformer on LM+MNLI."""
+  """Hparams for transformer on LM for pretraining/finetuning/mixing."""
   hparams = transformer_base()
   hparams.batch_size = 2048
   hparams.hidden_size = 768
   hparams.filter_size = 3072
   hparams.num_hidden_layers = 12
   hparams.num_heads = 12
-  hparams.learning_rate_schedule = (
-      "constant*linear_warmup*rsqrt_hidden_size")
-  hparams.learning_rate_constant = 2e-3
   hparams.label_smoothing = 0.0
   hparams.max_length = 512
   hparams.eval_drop_long_sequences = True
+  hparams.multiproblem_mixing_schedule = "pretrain"
   return hparams
+
+
+@registry.register_hparams
+def transformer_tall_finetune_textclass():
+  """Hparams for transformer on LM for finetuning on text class problems."""
+  hparams = transformer_tall()
+  hparams.learning_rate_constant = 6.25e-5
+  hparams.learning_rate_schedule = (
+      "linear_warmup*constant*linear_decay")
+  hparams.multiproblem_schedule_max_examples = 0
+  hparams.multiproblem_target_eval_only = True
+  hparams.multiproblem_class_loss_multiplier = 4
+  hparams.learning_rate_warmup_steps = 50
+  # Set train steps to learning_rate_decay_steps or less
+  hparams.learning_rate_decay_steps = 25000
+  hparams.multiproblem_reweight_label_loss = True
+  hparams.multiproblem_label_weight = 0.95
+  return hparams
+
+
+@registry.register_hparams
+def transformer_tall_pretrain_lm():
+  """Hparams for transformer on LM pretraining (with 64k vocab)."""
+  hparams = transformer_tall()
+  hparams.learning_rate_constant = 2e-4
+  hparams.learning_rate_schedule = (
+      "linear_warmup*constant*cosdecay")
+  hparams.optimizer = "AdamW"
+  hparams.optimizer_adam_beta1 = 0.9
+  hparams.optimizer_adam_beta2 = 0.999
+  hparams.optimizer_adam_epsilon = 1e-8
+  # Set max examples to something big when pretraining only the LM, definitely
+  # something an order of magnitude bigger than number of train steps.
+  hparams.multiproblem_schedule_max_examples = 5e8
+  # Set train steps to learning_rate_decay_steps or less
+  hparams.learning_rate_decay_steps = 5000000
+  return hparams
+
+
+@registry.register_hparams
+def transformer_tall_pretrain_lm_tpu_adafactor():
+  """Hparams for transformer on LM pretraining (with 64k vocab) on TPU."""
+  hparams = transformer_tall_pretrain_lm()
+  update_hparams_for_tpu(hparams)
+  hparams.max_length = 1024
+  # For multi-problem on TPU we need it in absolute examples.
+  hparams.batch_size = 8
+  hparams.multiproblem_vocab_size = 2**16
+  return hparams
+
+
+@registry.register_hparams
+def transformer_tall_pretrain_lm_tpu():
+  """Hparams for transformer on LM pretraining on TPU with AdamW."""
+  hparams = transformer_tall_pretrain_lm_tpu_adafactor()
+  # Optimizer gets reset in update_hparams_for_tpu so we set it again here.
+  hparams.learning_rate_constant = 2e-4
+  hparams.learning_rate_schedule = ("linear_warmup * constant * cosdecay")
+  hparams.optimizer = "AdamW"
+  return hparams
+
+
+@registry.register_hparams
+def transformer_tall_finetune_cnndm():
+  """Hparams for transformer on LM for finetuning on cnndm summarization."""
+  hparams = transformer_tall()
+  hparams.batch_size = 4096
+  hparams.multiproblem_max_input_length = 412
+  hparams.multiproblem_max_target_length = 100
+  hparams.multiproblem_schedule_max_examples = 0
+  hparams.learning_rate_schedule = (
+      "linear_warmup*constant*cosdecay")
+  hparams.learning_rate_constant = 5e-5
+  hparams.learning_rate_warmup_steps = 100
+  # Set train steps to learning_rate_decay_steps or less
+  hparams.learning_rate_decay_steps = 40000
+  hparams.multiproblem_target_eval_only = True
 
 
 @registry.register_hparams
@@ -2120,6 +1976,7 @@ def transformer_timeseries():
 def transformer_mlperf_tpu():
   """HParams for Transformer model on TPU for MLPerf on TPU 2x2."""
   hparams = transformer_base_v3()
+  hparams.mlperf_mode = True
   hparams.symbol_modality_num_shards = 1
   hparams.max_length = 256  # ignored when using "_packed" problems
   hparams.batch_size = 2048  # per-chip batch size matches the reference model

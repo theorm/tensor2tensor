@@ -71,13 +71,24 @@ class NextFrameBaseVae(object):
       tf.summary.scalar("beta", beta)
       return beta
 
-  def get_extra_loss(self, mean, std):
-    """Losses in addition to the default modality losses."""
-    kl_loss = common_layers.kl_divergence(mean, std)
+  def get_kl_loss(self, means, log_vars, means_p=None, log_vars_p=None):
+    """Get KL loss for all the predicted Gaussians."""
+    kl_loss = 0.0
+    if means_p is None:
+      means_p = tf.unstack(tf.zeros_like(means))
+    if log_vars_p is None:
+      log_vars_p = tf.unstack(tf.zeros_like(log_vars))
+    enumerated_inputs = enumerate(zip(means, log_vars, means_p, log_vars_p))
+    if self.is_training and self.hparams.stochastic_model:
+      for i, (mean, log_var, mean_p, log_var_p) in enumerated_inputs:
+        kl_loss += common_layers.kl_divergence(mean, log_var, mean_p, log_var_p)
+        tf.summary.histogram("posterior_mean_%d" % i, mean)
+        tf.summary.histogram("posterior_log_var_%d" % i, log_var)
+        tf.summary.histogram("prior_mean_%d" % i, mean_p)
+        tf.summary.histogram("prior_log_var_%d" % i, log_var_p)
+      tf.summary.scalar("kl_raw", tf.reduce_mean(kl_loss))
+
     beta = self.get_beta(kl_loss)
-    tf.summary.histogram("posterior_mean", mean)
-    tf.summary.histogram("posterior_std", std)
-    tf.summary.scalar("kl_raw", tf.reduce_mean(kl_loss))
     # information capacity from "Understanding disentangling in beta-VAE"
     if self.hparams.information_capacity > 0.0:
       kl_loss = tf.abs(kl_loss - self.hparams.information_capacity)

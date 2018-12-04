@@ -45,7 +45,7 @@ def get_model(hparams=None, mode=tf.estimator.ModeKeys.TRAIN,
                                                    VOCAB_SIZE,
                                                    hparams)
   if not has_input:
-    p_hparams.input_modality = {}
+    del p_hparams.modality["inputs"]
   hparams.problem_hparams = p_hparams
 
   inputs = -1 + np.random.random_integers(
@@ -206,8 +206,6 @@ class TransformerTest(tf.test.TestCase):
       beam_res = beam_result.eval()
       fast_res = fast_result.eval()
 
-    self.assertEqual(fast_res.shape,
-                     (BATCH_SIZE, INPUT_LENGTH + decode_length))
     self.assertAllClose(beam_res, fast_res)
 
   def testTransformerWithoutProblem(self):

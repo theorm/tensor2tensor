@@ -26,6 +26,7 @@ from tensor2tensor.data_generators import problem
 from tensor2tensor.data_generators import text_encoder
 from tensor2tensor.data_generators import text_problems
 from tensor2tensor.utils import bleu_hook
+from tensor2tensor.utils import mlperf_log
 
 import tensorflow as tf
 
@@ -87,6 +88,22 @@ def compute_bleu_summaries(hook_args):
       decode_hparams.decode_reference, decode_hparams.decode_to_file)
   values.append(tf.Summary.Value(tag="BLEU", simple_value=bleu))
   tf.logging.info("%s: BLEU = %6.2f" % (decode_hparams.decode_to_file, bleu))
+  if hook_args.hparams.mlperf_mode:
+    current_step = decode_hparams.mlperf_decode_step
+    mlperf_log.transformer_print(
+        key=mlperf_log.EVAL_TARGET, value=decode_hparams.mlperf_threshold)
+    mlperf_log.transformer_print(
+        key=mlperf_log.EVAL_ACCURACY,
+        value={
+            "epoch": max(current_step // decode_hparams.iterations_per_loop - 1,
+                         0),
+            "value": bleu
+        })
+    mlperf_log.transformer_print(key=mlperf_log.EVAL_STOP)
+
+  if bleu >= decode_hparams.mlperf_threshold:
+    decode_hparams.set_hparam("mlperf_success", True)
+
   return values
 
 

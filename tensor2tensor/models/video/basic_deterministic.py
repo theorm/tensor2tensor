@@ -41,8 +41,8 @@ class NextFrameBasicDeterministic(base.NextFrameBase):
   def is_recurrent_model(self):
     return False
 
-  def inject_latent(self, layer, inputs, target):
-    del inputs, target
+  def inject_latent(self, layer, inputs, target, action):
+    del inputs, target, action
     return layer, 0.0
 
   def middle_network(self, layer, internal_states):
@@ -52,7 +52,7 @@ class NextFrameBasicDeterministic(base.NextFrameBase):
     filters = common_layers.shape_list(x)[-1]
     for i in range(self.hparams.num_hidden_layers):
       with tf.variable_scope("layer%d" % i):
-        y = tf.nn.dropout(x, 1.0 - self.hparams.dropout)
+        y = tf.nn.dropout(x, 1.0 - self.hparams.residual_dropout)
         y = tf.layers.conv2d(y, filters, kernel1, activation=common_layers.belu,
                              strides=(1, 1), padding="SAME")
         if i == 0:
@@ -61,17 +61,35 @@ class NextFrameBasicDeterministic(base.NextFrameBase):
           x = common_layers.layer_norm(x + y)
     return x, internal_states
 
+  def update_internal_states_early(self, internal_states, frames):
+    """Update the internal states early in the network if requested."""
+    del frames
+    return internal_states
+
   def next_frame(self, frames, actions, rewards, target_frame,
                  internal_states, video_extra):
-    del video_extra
+    del rewards, video_extra
 
     hparams = self.hparams
     filters = hparams.hidden_size
     kernel2 = (4, 4)
+    action = actions[-1]
 
-    # Embed the inputs.
-    stacked_frames = tf.concat(frames, axis=-1)
+    # Stack the inputs.
+    if internal_states is not None and hparams.concat_internal_states:
+      # Use the first part of the first internal state if asked to concatenate.
+      batch_size = common_layers.shape_list(frames[0])[0]
+      internal_state = internal_states[0][0][:batch_size, :, :, :]
+      stacked_frames = tf.concat(frames + [internal_state], axis=-1)
+    else:
+      stacked_frames = tf.concat(frames, axis=-1)
     inputs_shape = common_layers.shape_list(stacked_frames)
+
+    # Update internal states early if requested.
+    if hparams.concat_internal_states:
+      internal_states = self.update_internal_states_early(
+          internal_states, frames)
+
     # Using non-zero bias initializer below for edge cases of uniform inputs.
     x = tf.layers.dense(
         stacked_frames, filters, name="inputs_embed",
@@ -83,6 +101,7 @@ class NextFrameBasicDeterministic(base.NextFrameBase):
     for i in range(hparams.num_compress_steps):
       with tf.variable_scope("downstride%d" % i):
         layer_inputs.append(x)
+        x = tf.nn.dropout(x, 1.0 - self.hparams.dropout)
         x = common_layers.make_even_size(x)
         if i < hparams.filter_double_steps:
           filters *= 2
@@ -93,12 +112,11 @@ class NextFrameBasicDeterministic(base.NextFrameBase):
 
     # Add embedded action if present.
     if self.has_actions:
-      action = actions[:, -1, :]
       x = common_video.inject_additional_input(
           x, action, "action_enc", hparams.action_injection)
 
     # Inject latent if present. Only for stochastic models.
-    x, extra_loss = self.inject_latent(x, frames, target_frame)
+    x, extra_loss = self.inject_latent(x, frames, target_frame, action)
 
     x_mid = tf.reduce_mean(x, axis=[1, 2], keepdims=True)
     x, internal_states = self.middle_network(x, internal_states)
@@ -107,6 +125,7 @@ class NextFrameBasicDeterministic(base.NextFrameBase):
     layer_inputs = list(reversed(layer_inputs))
     for i in range(hparams.num_compress_steps):
       with tf.variable_scope("upstride%d" % i):
+        x = tf.nn.dropout(x, 1.0 - self.hparams.dropout)
         if self.has_actions:
           x = common_video.inject_additional_input(
               x, action, "action_enc", hparams.action_injection)
@@ -137,6 +156,6 @@ class NextFrameBasicDeterministic(base.NextFrameBase):
     reward_pred = tf.concat([x_mid, x_fin], axis=-1)
     reward_pred = tf.nn.relu(tf.layers.dense(
         reward_pred, 128, name="reward_pred"))
-    reward_pred = tf.expand_dims(reward_pred, axis=3)  # Need fake channels dim.
+    reward_pred = tf.squeeze(reward_pred, axis=1)  # Remove extra dims
+    reward_pred = tf.squeeze(reward_pred, axis=1)  # Remove extra dims
     return x, reward_pred, extra_loss, internal_states
-

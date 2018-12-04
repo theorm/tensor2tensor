@@ -23,6 +23,7 @@ import os
 
 from tensor2tensor.data_generators import generator_utils
 from tensor2tensor.data_generators import image_utils
+from tensor2tensor.layers import modalities
 from tensor2tensor.utils import registry
 
 import tensorflow as tf
@@ -163,6 +164,15 @@ class ImageImagenet224(ImageImagenetRescaled):
 
 
 @registry.register_problem
+class ImageImagenet256(ImageImagenetRescaled):
+  """Imagenet rescaled to 256x256."""
+
+  @property
+  def rescale_size(self):
+    return [256, 256]
+
+
+@registry.register_problem
 class ImageImagenet32(ImageImagenetRescaled):
   """Imagenet rescaled to 32x32."""
 
@@ -189,7 +199,7 @@ class ImageImagenet32(ImageImagenetRescaled):
 
 @registry.register_problem
 class ImageImagenet32Gen(ImageImagenet):
-  """Imagenet 32 from the pixen cnn paper"""
+  """Imagenet 32 from the pixen cnn paper."""
 
   @property
   def train_shards(self):
@@ -223,7 +233,7 @@ class ImageImagenet32Gen(ImageImagenet):
 
 @registry.register_problem
 class ImageImagenet64Gen(ImageImagenet):
-  """Imagenet 64 from the pixen cnn paper"""
+  """Imagenet 64 from the pixen cnn paper."""
 
   @property
   def train_shards(self):
@@ -303,7 +313,7 @@ class ImageImagenetMultiResolutionGen(ImageImagenet64Gen):
 
 @registry.register_problem
 class ImageImagenet32Small(ImageImagenet):
-  """Imagenet small from the pixel cnn paper"""
+  """Imagenet small from the pixel cnn paper."""
 
   @property
   def is_small(self):
@@ -357,8 +367,10 @@ class Img2imgImagenet(image_utils.ImageProblem):
 
   def hparams(self, defaults, unused_model_hparams):
     p = defaults
-    p.input_modality = {"inputs": ("image:identity", 256)}
-    p.target_modality = ("image:identity", 256)
+    p.modality = {"inputs": modalities.IdentityModality,
+                  "targets": modalities.IdentityModality}
+    p.vocab_size = {"inputs": 256,
+                    "targets": 256}
     p.batch_size_multiplier = 256
     p.input_space_id = 1
     p.target_space_id = 1

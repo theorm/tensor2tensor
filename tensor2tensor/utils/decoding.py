@@ -32,6 +32,7 @@ from six.moves import input  # pylint: disable=redefined-builtin
 from tensor2tensor.data_generators import problem as problem_lib
 from tensor2tensor.data_generators import text_encoder
 from tensor2tensor.data_generators import text_problems
+from tensor2tensor.utils import mlperf_log
 from tensor2tensor.utils import registry
 import tensorflow as tf
 
@@ -62,14 +63,31 @@ def decode_hparams(overrides=""):
       delimiter="\n",
       decode_to_file=None,
       decode_in_memory=False,
-      shards=1,
-      shard_id=0,
+      summaries_log_dir="decode",  # Directory to write hook summaries.
+      shards=1,    # How many shards of data to decode (treating 1 as None).
+      shard_id=0,  # Which shard are we decoding if more than 1 above.
+      shards_start_offset=0,  # Number of the first shard to decode.
       num_decodes=1,
       force_decode_length=False,
       display_decoded_images=False,
+      # Multi-problem decoding task id.
+      multiproblem_task_id=-1,
       # Used for video decoding.
       frames_per_second=10,
-      skip_eos_postprocess=False)
+      skip_eos_postprocess=False,
+      # Creates a blue/red border covering border_percent of the frame.
+      border_percent=2,
+      # Maximum number of videos displayed.
+      # Total number of videos are max_display_outputs * num_decodes
+      max_display_outputs=10,
+      # Used in computation of VGG feature based video metrics.
+      # Set this to be the path to a trained VGG ckpt to output
+      # useful metrics.
+      vgg_ckpt_path=None,
+      # Used for MLPerf compliance logging.
+      mlperf_decode_step=0.0,
+      mlperf_threshold=25.0,
+      mlperf_success=False)
   hp.parse(overrides)
   return hp
 
@@ -113,7 +131,7 @@ def log_decode_results(inputs,
     save_path = os.path.join(
         output_dir, "%s_prediction_%d.jpg" % (problem_name, prediction_idx))
     show_and_save_image(inputs / 255., save_path)
-  elif inputs_vocab:
+  elif inputs is not None and inputs_vocab:
     if identity_output:
       decoded_inputs = " ".join(map(str, inputs.flatten()))
     else:
@@ -254,11 +272,13 @@ def decode_once(estimator,
   inputs_vocab = problem_hparams.vocabulary[inputs_vocab_key]
   targets_vocab = problem_hparams.vocabulary["targets"]
 
+  num_eval_samples = 0
   for num_predictions, prediction in enumerate(predictions):
+    num_eval_samples += 1
     num_predictions += 1
-    inputs = prediction["inputs"]
-    targets = prediction["targets"]
-    outputs = prediction["outputs"]
+    inputs = prediction.get("inputs")
+    targets = prediction.get("targets")
+    outputs = prediction.get("outputs")
 
     # Log predictions
     decoded_outputs = []
@@ -305,7 +325,7 @@ def decode_once(estimator,
     if decode_to_file:
       for i, (d_input, d_output, d_target) in enumerate(decoded_outputs):
         # Skip if all padding
-        if re.match("^({})+$".format(text_encoder.PAD), d_input):
+        if d_input and re.match("^({})+$".format(text_encoder.PAD), d_input):
           continue
         beam_score_str = ""
         if decode_hp.write_beam_scores:
@@ -317,6 +337,10 @@ def decode_once(estimator,
     if (decode_hp.num_samples >= 0 and
         num_predictions >= decode_hp.num_samples):
       break
+
+  mlperf_log.transformer_print(key=mlperf_log.EVAL_SIZE,
+                               value=num_eval_samples,
+                               hparams=hparams)
 
   if decode_to_file:
     output_file.close()
@@ -344,15 +368,16 @@ def decode_from_file(estimator,
   inputs_vocab = p_hp.vocabulary[inputs_vocab_key]
   targets_vocab = p_hp.vocabulary["targets"]
   problem_name = FLAGS.problem
-  tf.logging.info("Performing decoding from a file.")
-  sorted_inputs, sorted_keys = _get_sorted_inputs(filename, decode_hp.shards,
-                                                  decode_hp.delimiter)
+  filename = _add_shard_to_filename(filename, decode_hp)
+  tf.logging.info("Performing decoding from file (%s)." % filename)
+  sorted_inputs, sorted_keys = _get_sorted_inputs(filename, decode_hp.delimiter)
   num_decode_batches = (len(sorted_inputs) - 1) // decode_hp.batch_size + 1
 
   def input_fn():
-    input_gen = _decode_batch_input_fn(num_decode_batches, sorted_inputs,
-                                       inputs_vocab, decode_hp.batch_size,
-                                       decode_hp.max_input_size)
+    input_gen = _decode_batch_input_fn(
+        num_decode_batches, sorted_inputs,
+        inputs_vocab, decode_hp.batch_size,
+        decode_hp.max_input_size, task_id=decode_hp.multiproblem_task_id)
     gen_fn = make_input_fn_from_generator(input_gen)
     example = gen_fn()
     return _decode_input_tensor_to_features_dict(example, hparams)
@@ -381,6 +406,8 @@ def decode_from_file(estimator,
       output_beams = np.split(result["outputs"], decode_hp.beam_size, axis=0)
       scores = None
       if "scores" in result:
+        if np.isscalar(result["scores"]):
+          result["scores"] = result["scores"].reshape(1)
         scores = np.split(result["scores"], decode_hp.beam_size, axis=0)
       for k, beam in enumerate(output_beams):
         tf.logging.info("BEAM %d:" % k)
@@ -416,8 +443,10 @@ def decode_from_file(estimator,
     total_time_per_step += elapsed_time
     total_cnt += result["outputs"].shape[-1]
   tf.logging.info("Elapsed Time: %5.5f" % (time.time() - start_time))
-  tf.logging.info("Averaged Single Token Generation Time: %5.7f" %
-                  (total_time_per_step / total_cnt))
+  tf.logging.info("Averaged Single Token Generation Time: %5.7f "
+                  "(time %5.7f count %d)" %
+                  (total_time_per_step / total_cnt,
+                   total_time_per_step, total_cnt))
 
   # Reversing the decoded inputs and outputs because they were reversed in
   # _decode_batch_input_fn
@@ -429,6 +458,8 @@ def decode_from_file(estimator,
   decode_filename = decode_to_file if decode_to_file else filename
   if not decode_to_file:
     decode_filename = _decode_filename(decode_filename, problem_name, decode_hp)
+  else:
+    decode_filename = _add_shard_to_filename(decode_filename, decode_hp)
   tf.logging.info("Writing decodes into %s" % decode_filename)
   outfile = tf.gfile.Open(decode_filename, "w")
   for index in range(len(sorted_inputs)):
@@ -449,6 +480,13 @@ def decode_from_file(estimator,
   ), None)
 
 
+def _add_shard_to_filename(filename, decode_hp):
+  if decode_hp.shards > 1:
+    shard_id = decode_hp.shard_id + decode_hp.shards_start_offset
+    filename = filename + ("%.3d" % shard_id)
+  return filename
+
+
 def _decode_filename(base_filename, problem_name, decode_hp):
   """Generates decode filename.
 
@@ -461,7 +499,7 @@ def _decode_filename(base_filename, problem_name, decode_hp):
     A string, produced decode filename.
   """
   if decode_hp.shards > 1:
-    base_filename = base_filename + ("%.2d" % decode_hp.shard_id)
+    base_filename = _add_shard_to_filename(base_filename, decode_hp)
   if ("beam{beam}.alpha{alpha}.decodes".format(
       beam=str(decode_hp.beam_size), alpha=str(decode_hp.alpha))
       in base_filename):
@@ -525,6 +563,8 @@ def decode_interactively(estimator, hparams, decode_hp, checkpoint_path=None):
       beams = np.split(result["outputs"], decode_hp.beam_size, axis=0)
       scores = None
       if "scores" in result:
+        if np.isscalar(result["scores"]):
+          result["scores"] = result["scores"].reshape(1)
         scores = np.split(result["scores"], decode_hp.beam_size, axis=0)
       for k, beam in enumerate(beams):
         tf.logging.info("BEAM %d:" % k)
@@ -544,7 +584,7 @@ def decode_interactively(estimator, hparams, decode_hp, checkpoint_path=None):
 
 
 def _decode_batch_input_fn(num_decode_batches, sorted_inputs, vocabulary,
-                           batch_size, max_input_size):
+                           batch_size, max_input_size, task_id=-1):
   """Generator to produce batches of inputs."""
   tf.logging.info(" batch %d" % num_decode_batches)
   # First reverse all the input sentences so that if you're going to get OOMs,
@@ -559,7 +599,8 @@ def _decode_batch_input_fn(num_decode_batches, sorted_inputs, vocabulary,
       if max_input_size > 0:
         # Subtract 1 for the EOS_ID.
         input_ids = input_ids[:max_input_size - 1]
-      input_ids.append(text_encoder.EOS_ID)
+      final_id = text_encoder.EOS_ID if task_id < 0 else task_id
+      input_ids.append(final_id)
       batch_inputs.append(input_ids)
       if len(input_ids) > batch_length:
         batch_length = len(input_ids)
@@ -597,7 +638,7 @@ def _interactive_input_fn(hparams, decode_hp):
   decode_length = decode_hp.extra_length
   input_type = "text"
   p_hparams = hparams.problem_hparams
-  has_input = "inputs" in p_hparams.input_modality
+  has_input = "inputs" in p_hparams.modality
   vocabulary = p_hparams.vocabulary["inputs" if has_input else "targets"]
   # This should be longer than the longest input.
   const_array_size = 10000
@@ -686,13 +727,11 @@ def show_and_save_image(img, save_path):
     plt.savefig(sp)
 
 
-def _get_sorted_inputs(filename, num_shards=1, delimiter="\n"):
+def _get_sorted_inputs(filename, delimiter="\n"):
   """Returning inputs sorted according to length.
 
   Args:
     filename: path to file with inputs, 1 per line.
-    num_shards: number of input shards. If > 1, will read from file filename.XX,
-      where XX is FLAGS.worker_id.
     delimiter: str, delimits records in the file.
 
   Returns:
@@ -700,13 +739,7 @@ def _get_sorted_inputs(filename, num_shards=1, delimiter="\n"):
 
   """
   tf.logging.info("Getting sorted inputs")
-  # read file and sort inputs according them according to input length.
-  if num_shards > 1:
-    decode_filename = filename + ("%.2d" % FLAGS.worker_id)
-  else:
-    decode_filename = filename
-
-  with tf.gfile.Open(decode_filename) as f:
+  with tf.gfile.Open(filename) as f:
     text = f.read()
     records = text.split(delimiter)
     inputs = [record.strip() for record in records]
@@ -836,7 +869,7 @@ def run_postdecode_hooks(decode_hook_args, dataset_split):
     return
   tf.logging.info("Running decode hooks.")
   parent_dir = os.path.join(decode_hook_args.output_dirs[0], os.pardir)
-  child_dir = "decode"
+  child_dir = decode_hook_args.decode_hparams.summaries_log_dir
   if dataset_split is not None:
     child_dir += "_{}".format(dataset_split)
   final_dir = os.path.join(parent_dir, child_dir)

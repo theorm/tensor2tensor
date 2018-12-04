@@ -29,6 +29,7 @@ import numpy as np
 from six.moves import range  # pylint: disable=redefined-builtin
 
 import tensorflow as tf
+import tensorflow_probability as tfp
 
 from tensorflow.python.framework import function
 from tensorflow.python.framework import ops
@@ -1602,9 +1603,6 @@ def weights_multi_problem(labels, taskid=-1):
   Raises:
     ValueError: The Task ID must be valid.
   """
-  if taskid < 0:
-    raise ValueError("Task ID must be non-negative.")
-
   past_taskid = tf.cumsum(tf.to_float(tf.equal(labels, taskid)), axis=1)
   # Additionally zero out the task id location
   past_taskid *= tf.to_float(tf.not_equal(labels, taskid))
@@ -1615,9 +1613,6 @@ def weights_multi_problem(labels, taskid=-1):
 def weights_multi_problem_all(labels, taskid=-1):
   """Assign weight 1.0 to only examples from the given task."""
   weights = tf.to_float(tf.not_equal(labels, 0))
-  if taskid < 0:
-    raise ValueError("Task ID must be non-negative.")
-
   past_taskid = tf.cumsum(tf.to_float(tf.equal(labels, taskid)), axis=1)
   # Additionally zero out the task id location
   past_taskid *= tf.to_float(tf.not_equal(labels, taskid))
@@ -1970,7 +1965,7 @@ def smoothing_cross_entropy(logits,
     if gaussian and confidence > 0.0:
       labels = tf.cast(labels, tf.float32)
 
-      normal_dist = tf.distributions.Normal(loc=labels, scale=confidence)
+      normal_dist = tfp.distributions.Normal(loc=labels, scale=confidence)
       # Locations to evaluate the probability distributions.
       soft_targets = normal_dist.prob(
           tf.cast(tf.range(vocab_size), tf.float32)[:, None, None, None, None])
@@ -2821,7 +2816,20 @@ def sample_with_temperature(logits, temperature):
 
 
 def ones_matrix_band_part(rows, cols, num_lower, num_upper, out_shape=None):
-  """Matrix band part of ones."""
+  """Matrix band part of ones.
+
+  Args:
+    rows: int determining number of rows in output
+    cols: int
+    num_lower: int, maximum distance backward. Negative values indicate
+      unlimited.
+    num_upper: int, maximum distance forward. Negative values indicate
+      unlimited.
+    out_shape: shape to reshape output by.
+
+  Returns:
+    Tensor of size rows * cols reshaped into shape out_shape.
+  """
   if all([isinstance(el, int) for el in [rows, cols, num_lower, num_upper]]):
     # Needed info is constant, so we construct in numpy
     if num_lower < 0:
@@ -3019,8 +3027,10 @@ def mix(x1,
     if is_xla_compiled():
       return get_res()
     else:
-      return tf.cond(
-          tf.less(tf.train.get_global_step(), steps), get_res, lambda: x1)
+      cur_step = tf.train.get_global_step()
+      if cur_step is None:
+        return x1  # Step not available, probably eval mode, don't mix.
+      return tf.cond(tf.less(cur_step, steps), get_res, lambda: x1)
 
 
 def brelu(x):
@@ -3701,19 +3711,26 @@ def targeted_dropout(inputs,
     return inputs
 
 
-# TODO(mbz): use tf.distributions.kl_divergence instead.
-def kl_divergence(mu, log_sigma):
-  """KL divergence of diagonal gaussian N(mu,exp(log_sigma)) and N(0,1).
+def kl_divergence(mu, log_var, mu_p=0.0, log_var_p=0.0):
+  """KL divergence of diagonal gaussian N(mu,exp(log_var)) and N(0,1).
 
   Args:
     mu: mu parameter of the distribution.
-    log_sigma: log(sigma) parameter of the distribution.
+    log_var: log(var) parameter of the distribution.
+    mu_p: optional mu from a learned prior distribution
+    log_var_p: optional log(var) from a learned prior distribution
   Returns:
     the KL loss.
   """
+
   batch_size = shape_list(mu)[0]
-  kl = -.5 * tf.reduce_sum(1. + log_sigma - tf.square(mu) - tf.exp(log_sigma))
-  return kl / tf.to_float(batch_size)
+  prior_distribution = tfp.distributions.Normal(
+      mu_p, tf.exp(tf.multiply(0.5, log_var_p)))
+  posterior_distribution = tfp.distributions.Normal(
+      mu, tf.exp(tf.multiply(0.5, log_var)))
+  kld = tfp.distributions.kl_divergence(posterior_distribution,
+                                        prior_distribution)
+  return tf.reduce_sum(kld) / tf.to_float(batch_size)
 
 
 def sparse_equals_constant(constant, tensor):

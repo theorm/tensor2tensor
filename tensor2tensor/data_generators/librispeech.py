@@ -134,11 +134,11 @@ class Librispeech(speech_recognition.SpeechRecognitionProblem):
             members.append(f)
         corpus_tar.extractall(tmp_dir, members=members)
 
-      data_dir = os.path.join(tmp_dir, "LibriSpeech", subdir)
-      data_files = _collect_data(data_dir, "flac", "txt")
+      raw_data_dir = os.path.join(tmp_dir, "LibriSpeech", subdir)
+      data_files = _collect_data(raw_data_dir, "flac", "txt")
       data_pairs = data_files.values()
 
-      encoders = self.feature_encoders(None)
+      encoders = self.feature_encoders(data_dir)
       audio_encoder = encoders["waveforms"]
       text_encoder = encoders["targets"]
 
