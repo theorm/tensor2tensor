@@ -1505,7 +1505,7 @@ class T2TModel(base.Layer):
           summary_op=tf.summary.merge_all())
       evaluation_hooks.append(eval_summary_hook)
 
-      eval_summary_hook += problem.eval_hooks(features, logits, hparams)
+      evaluation_hooks += problem.eval_hooks(features, logits, hparams)
 
       return tf.estimator.EstimatorSpec(
           tf.estimator.ModeKeys.EVAL,
