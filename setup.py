@@ -50,7 +50,7 @@ setup(
         'six',
         'sympy',
         'tensorflow-probability',
-        # 'tfds-nightly', # fails for python 3
+        'tfds-nightly',
         'tqdm',
     ],
     extras_require={
